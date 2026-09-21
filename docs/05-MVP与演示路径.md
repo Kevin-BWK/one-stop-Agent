@@ -3,9 +3,10 @@
 ## 运行方式
 
 ```bash
-python run_demo.py               # 两个场景都跑
+python run_demo.py               # 两个场景都跑，并演示并联办理进度推进
 python run_demo.py restaurant    # 开办餐饮店
 python run_demo.py enterprise    # 开办企业
+python run_demo.py --query YJS0001   # 按办理单号查询办理进度看板
 python tests/test_flow.py        # 冒烟测试
 ```
 
@@ -23,6 +24,7 @@ python tests/test_flow.py        # 冒烟测试
 
 ## 数据模拟
 
-- 政务系统用 `app/mock_gov/services.py` 模拟并联办理与进度。
+- 政务系统用 `app/mock_gov/services.py` 模拟并联办理；各部门事项由子 Agent 办结后回调主 Agent 更新进度。
+- 办理单与进度用 `app/storage/repo.py` 的 `JsonFileRepo` 落盘到 `data/runtime/cases.json`，支持按单号跨进程查询。
 - 知识库用 `data/knowledge/*.md`，检索为桩实现，后续替换为向量检索。
 - MoMA 调用用 `app/moma/client.py` 桩，后续替换为真实 API。
