@@ -1,0 +1,3 @@
+# 核心运行仅需 Python 标准库；接入桌面 GUI 与真实 MoMA 时再安装
+PySide6>=6.6
+requests>=2.31

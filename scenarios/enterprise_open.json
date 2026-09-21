@@ -1,0 +1,28 @@
+{
+  "id": "enterprise_open",
+  "name": "开办企业一件事",
+  "opening": "我想注册一家科技公司",
+  "collect_fields": [
+    {"key": "company_name", "label": "企业名称", "type": "text", "required": true},
+    {"key": "legal_person", "label": "法定代表人", "type": "text"},
+    {"key": "registered_capital", "label": "注册资本（万元）", "type": "number"},
+    {"key": "business_scope", "label": "经营范围", "type": "text"},
+    {"key": "address", "label": "注册地址", "type": "text"},
+    {"key": "need_bank", "label": "是否同步预约银行开户", "type": "bool"},
+    {"key": "employees", "label": "拟用工人数", "type": "number"}
+  ],
+  "items": {
+    "A_license": {"name": "企业设立登记", "department": "市场监管", "output": "营业执照"},
+    "B_tax": {"name": "税务登记", "department": "税务", "output": "税务登记信息"},
+    "C_social": {"name": "社保登记", "department": "人社", "output": "社保登记"},
+    "D_bank": {"name": "银行开户预约", "department": "银行", "output": "开户预约单"},
+    "E_seal": {"name": "公章刻制备案", "department": "公安", "output": "印章"}
+  },
+  "base_items": ["A_license", "B_tax", "C_social", "E_seal"],
+  "base_materials": ["法定代表人身份证", "住所证明", "公司章程"],
+  "condition_rules": [
+    {"if": {"field": "need_bank", "bool": true}, "add_items": ["D_bank"], "note": "已同步预约银行开户"},
+    {"if": {"field": "employees", "gte": 10}, "add_materials": ["用工备案材料"], "note": "拟用工达到 10 人，需同步用工备案"}
+  ],
+  "guide": "开办企业需办理设立登记、税务、社保、公章刻制；可根据需要预约银行开户。"
+}
