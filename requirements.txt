@@ -1,0 +1,5 @@
+# 核心运行仅需 Python 标准库；接入 Web 服务与真实 MoMA 时再安装
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2.6
+requests>=2.31
