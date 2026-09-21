@@ -5,3 +5,6 @@ venv/
 .env
 *.egg-info/
 .DS_Store
+
+# 运行时生成的办理单数据（进度查询用）
+data/runtime/

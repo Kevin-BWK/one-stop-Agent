@@ -19,6 +19,7 @@ class MoMAClient:
         "condition": "rule",
         "verify": "vision",
         "progress": "rule",
+        "item": "rule",
         "default": "light",
     }
 
