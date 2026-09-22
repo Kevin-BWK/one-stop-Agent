@@ -1,9 +1,9 @@
-"""编排事件：供 GUI 等调用方实时订阅办理过程。
+"""编排事件：供前端等调用方实时订阅办理过程。
 
 `MainAgent.run(utterance, answers, on_event=...)` / `query(case_id, on_event=...)`
 在关键节点触发事件；**不传 on_event 时行为与以往完全一致**（只返回 trace 与 case）。
 
-桌面端（PySide6）只需把 Event 转成 Qt 信号 `emit`，编排逻辑无需再改。
+Web 层（FastAPI）只需把 `Event.to_dict()` 写入 SSE 流的 `data`，编排逻辑无需再改。
 事件契约见 docs/07-前端交互设计.md。
 """
 from dataclasses import dataclass, field
@@ -22,3 +22,7 @@ class Event:
     """一次编排事件：type 为类型，data 为负载（字段定义见 docs/07）。"""
     type: str
     data: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转为可 JSON 序列化的字典（Web 层写入 SSE data 用）。"""
+        return {"type": self.type, "data": self.data}

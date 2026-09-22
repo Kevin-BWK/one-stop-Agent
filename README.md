@@ -11,7 +11,7 @@
 ## 架构概览
 
 ```
-接入层   PySide6 桌面客户端（预留）
+接入层   Vue 3 Web / APP 客户端（预留）
 编排层   MoMA 多 Agent 编排（主 Agent + 子 Agent 群，含各部门事项 Agent）
 能力层   MoMA：多模型调度 · 智能路由 · 上下文管理 · RAG · 工具调用
 模型层   九天大模型 + 生态模型（DeepSeek / Qwen / GLM / Qwen-VL）
@@ -70,13 +70,13 @@ one-stop-agent/
 
 | 层级 | 当前骨架（零依赖） | 目标 / 生产形态 |
 | --- | --- | --- |
-| 语言 / 运行 | Python 3.10+ 标准库（dataclass） | Python + PySide6 桌面客户端 |
+| 语言 / 运行 | Python 3.10+ 标准库（dataclass） | Python + FastAPI + uvicorn |
 | 平台底座 | `MoMAClient` 桩 | 移动云 MoMA 多模型调度 / 路由 / 上下文 |
 | 模型 | deepseek-r1 / qwen-turbo / qwen-vl / 规则引擎（桩） | 九天大模型 + DeepSeek / Qwen / GLM / Qwen-VL |
 | 知识检索 | 整篇 markdown 返回 | 向量库 + Embedding（BGE 等）RAG |
 | 上下文 / 数据 | `SessionContext` / `InMemoryRepo` 内存 | Redis + PostgreSQL / MySQL |
 | 政务集成 | `MockGovServices` 本地模拟 | 市场监管 / 税务 / 消防 / 城管 / 卫健接口 |
-| 前端 | 暂未实现（预留，设计见「前端交互设计」） | PySide6 桌面客户端（聊天 + 动态表单 + 进度看板） |
+| 前端 | 暂未实现（预留，设计见「前端交互设计」） | Vue 3 + TypeScript（Web，可打包 APP）+ SSE 事件推送 |
 
 ## 快速开始
 
@@ -95,7 +95,7 @@ python tests/test_flow.py
 
 - 要求 Python 3.10+（已在 3.12 验证），核心运行仅用标准库。
 - Windows 若无 `python` 命令，可改用 `py` 启动器，如 `py -3 run_demo.py`。
-- 接入桌面 GUI / 真实 MoMA 时再安装：`pip install -r requirements.txt`。
+- 接入 Web 前端 / 真实 MoMA 时再安装：`pip install -r requirements.txt`。
 
 ## 桩实现 → 真实接入
 
@@ -106,41 +106,38 @@ python tests/test_flow.py
 | `app/mock_gov/services.py` | 本地内存模拟并联办理 | 对接真实政务系统 |
 | `app/storage/repo.py` | 内存 / JSON 文件（跨进程查询进度） | PostgreSQL / MySQL |
 
-## 前端交互设计（PySide6 桌面客户端）
+## 前端交互设计（Vue 3 + TypeScript，SSE 事件推送）
 
-GUI 形态为 **PySide6（Qt for Python）桌面客户端**（不做微信小程序、不做 Web 门户），
-与编排层**同进程**运行：不需要 HTTP 服务，也不需要 SSE / WebSocket / 前端轮询，
-进度推送直接走 **Qt 信号 / 槽**。
+前端形态为 **Vue 3 + TypeScript**：既能做网页，也为后续兼容 APP 留出空间。
+进度看板要反映**真实办理进度**，因此不做“回放动画”（对办事人无意义），
+也不做前端轮询（空转多、有延迟），而是由后端**服务端推送**：
 
 ```
-主线程（UI）                                后台 QThread
-  MainWindow
-   ├─ ChatPanel（聊天）
-   ├─ FormPanel（动态表单，由场景字段渲染）
-   └─ ProgressPanel（进度看板）
-         ▲
-         | Qt 信号（自动排队回主线程）
-         |
-   OrchestratorWorker -> MainAgent.run(utterance, answers)
-                         通过 on_event 回调 emit 信号
+前端 Vue 3（聊天 / 表单 / 进度看板）        后端 FastAPI + 编排层
+        |  POST /apply  ------------------->  主 Agent 启动编排
+        |                                       节点完成 / 部门子 Agent 回调
+        |  <-- event: flow_node   {node, done, total}
+        |  <-- event: item_done   {item}
+        |  <-- event: finished    {case_id, flow}
+        |  流结束
 ```
 
-- **进度是真实办理进度**：后端每完成一个节点 / 每收到一次部门子 Agent 回调，就 `emit` 一个信号，看板即时增量刷新——不做回放动画，也不用定时轮询。
-- **动态表单**：表单区消费 `scenarios/*.json` 的 `collect_fields` 自动渲染控件，新增“一件事”不改 GUI。
-- **线程安全**：编排在 `QThread` 中执行，事件经信号排队回主线程后才刷新界面。
+- **进度是真实办理进度**：后端每完成一个节点 / 每收到一次部门子 Agent 回调，立即推一条事件，看板增量刷新——进度零延迟、无空转。
+- **动态表单**：表单区消费 `scenarios/*.json` 的 `collect_fields` 自动渲染控件，新增“一件事”不改前端。
+- **事件负载复用现有结构**：`flow_node` 取 `FlowProgress.snapshot()`，`item_done` 取部门回调结果，`case_created` / `finished` 取 `CaseRecord`。
 
-编排事件与 Qt 信号的对应：
+事件与前端处理的对应：
 
-| 事件 | Qt 信号 | 界面响应 |
+| 事件 | 负载 | 前端处理 |
 | --- | --- | --- |
-| `message` | `message_ready(stage, text)` | 聊天区追加气泡 |
-| `flow_node` | `flow_node_changed(node, done, total)` | 看板更新节点 + 进度条 |
-| `case_created` | `case_created(case)` | 显示办理单号与事项清单 |
-| `item_done` | `item_done(item)` | 看板更新并联事项 |
-| `finished` | `run_finished(case)` | 结束态 |
-| `error` | `run_failed(message)` | 弹窗提示 |
+| `message` | `stage`, `text` | 聊天区追加气泡 |
+| `flow_node` | `key/name/status/detail` + `done/total` | 看板更新节点 + 进度条 |
+| `case_created` | `case_id` / `items` / `materials` | 显示办理单号与事项清单 |
+| `item_done` | 部门 / 事项 / 状态 / 出件 | 看板更新并联事项 |
+| `finished` | 最终 `flow` / `item_status` | 结束态 |
+| `error` | `code` / `message` | 提示并恢复界面 |
 
-> 说明：**GUI 尚未实现**；其依赖的编排事件出口（`MainAgent.run / query` 的可选 `on_event` 回调）已就绪，实现 GUI 时直接订阅即可。完整的线程模型、信号契约与界面行为见 `docs/07-前端交互设计.md`。
+> 说明：**前端尚未实现**；其依赖的编排事件出口（`MainAgent.run / query` 的可选 `on_event` 回调，`Event.to_dict()` 可直接序列化为 SSE `data`）已就绪，Web 层订阅即可。完整的工程结构、事件契约与接口定义见 `docs/07-前端交互设计.md`。
 
 ## 工作总结与分工
 
@@ -149,7 +146,7 @@ GUI 形态为 **PySide6（Qt for Python）桌面客户端**（不做微信小程
 - 双场景骨架（开办企业 / 开办餐饮店）共用同一套编排框架。
 - 完整编排闭环：意图路由 → 咨询 → 信息采集 → 条件判定 → 材料核验 → 并联提交 → 进度查询。
 - 办理进度可推进：流程节点逐个“打勾”（意图识别 → … → 进度跟踪），并联事项由各部门事项子 Agent 办结后回调主 Agent 自动打勾，支持按单号查询进度看板。
-- 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 PySide6 桌面端实时刷新进度预留。
+- 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 Vue 3 前端经 SSE 实时刷新进度预留。
 - 配置化条件路由：面积、油烟、生食/冷食、招牌、银行开户、用工人数等按规则增减事项与材料。
 - MoMA 三大能力落点（多模型调度 / 智能路由 / 上下文管理），当前为桩实现。
 - Mock 政务并联办理与进度状态，冒烟测试一键验证。
@@ -166,7 +163,7 @@ GUI 形态为 **PySide6（Qt for Python）桌面客户端**（不做微信小程
 
 - [x] 双场景骨架 + 完整编排闭环 + 条件路由
 - [x] 进度状态推进（让“办理进度”可变化）
-- [ ] PySide6 桌面客户端（聊天 + 动态表单 + 进度看板，见「前端交互设计」）
+- [ ] Vue 3 + TypeScript 前端（聊天 + 动态表单 + 进度看板，SSE 事件推送，见「前端交互设计」）
 - [ ] MoMA 真实 API 接入
 - [ ] 向量化知识库与 RAG 检索
 - [ ] 多模态材料核验

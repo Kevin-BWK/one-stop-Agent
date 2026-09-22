@@ -149,6 +149,9 @@ def test_events_emitted_for_gui():
     assert events[-1].data["case_id"] == case.case_id
     assert all(node["status"] == STATUS_DONE for node in events[-1].data["flow"])
 
+    # 事件可 JSON 序列化（Web 层需写入 SSE data）
+    assert json.loads(json.dumps([event.to_dict() for event in events]))[-1]["type"] == FINISHED
+
 
 def test_run_without_on_event_unchanged():
     """不传 on_event 时行为与以往一致（向后兼容）。"""
