@@ -1,5 +1,5 @@
 """FastAPI 请求 / 响应模型（Pydantic v2）。"""
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -17,6 +17,13 @@ class FieldSubmitRequest(BaseModel):
     session_id: str
     key: str
     value: Any
+
+
+class ApplyRequest(BaseModel):
+    """一次性提交并开始办理（前端事件流入口）。"""
+    scenario_id: str
+    utterance: str = ""
+    answers: Dict[str, Any] = {}
 
 
 class FieldQuestion(BaseModel):
@@ -40,7 +47,9 @@ class CaseOut(BaseModel):
     materials: List[str]
     verify_report: dict
     item_status: dict
+    flow: List[dict] = []
     created_at: str
+    updated_at: str = ""
 
 
 class TurnResponse(BaseModel):

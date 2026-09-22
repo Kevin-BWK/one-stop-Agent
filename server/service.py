@@ -208,7 +208,9 @@ class AgentService:
             "materials": case.materials,
             "verify_report": case.verify_report,
             "item_status": case.item_status,
+            "flow": case.flow,
             "created_at": case.created_at,
+            "updated_at": case.updated_at,
         }
 
     def _progress_list(self, rec: SessionRecord) -> List[dict]:

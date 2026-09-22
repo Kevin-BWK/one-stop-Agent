@@ -1,0 +1,16 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationBarTitleText": "一件事·一次办"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "white",
+    "navigationBarTitleText": "一件事·一次办",
+    "navigationBarBackgroundColor": "#1f6feb",
+    "backgroundColor": "#f5f7fb"
+  }
+}

@@ -8,3 +8,13 @@ venv/
 
 # 运行时生成的办理单数据（进度查询用）
 data/runtime/
+
+# 前端（uni-app）
+frontend/node_modules/
+frontend/dist/
+frontend/unpackage/
+frontend/.tmp/
+*.local
+
+# 日志
+*.log

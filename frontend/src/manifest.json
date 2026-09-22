@@ -1,0 +1,20 @@
+{
+  "name": "一件事·一次办",
+  "appid": "",
+  "description": "高效办成一件事 · 多 Agent 智能体",
+  "versionName": "0.1.0",
+  "versionCode": "100",
+  "transformPx": false,
+  "app-plus": {
+    "usingComponents": true,
+    "nvueStyleCompiler": "uni-app",
+    "compilerVersion": 3
+  },
+  "h5": {
+    "title": "一件事·一次办",
+    "router": {
+      "mode": "hash"
+    }
+  },
+  "vueVersion": "3"
+}
