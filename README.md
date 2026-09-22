@@ -11,7 +11,7 @@
 ## 架构概览
 
 ```
-接入层   uni-app 前端（Vue 3 + TypeScript）：微信小程序 · H5 · App（预留）
+接入层   uni-app 前端（Vue 3 + TypeScript）：App（成品） / H5（测试用）
 编排层   MoMA 多 Agent 编排（主 Agent + 子 Agent 群，含各部门事项 Agent）
 能力层   MoMA：多模型调度 · 智能路由 · 上下文管理 · RAG · 工具调用
 模型层   九天大模型 + 生态模型（DeepSeek / Qwen / GLM / Qwen-VL）
@@ -77,7 +77,7 @@ one-stop-agent/
 | 知识检索 | 整篇 markdown 返回 | 向量库 + Embedding（BGE 等）RAG |
 | 上下文 / 数据 | `SessionContext` / `InMemoryRepo` 内存 | Redis + PostgreSQL / MySQL |
 | 政务集成 | `MockGovServices` 本地模拟 | 市场监管 / 税务 / 消防 / 城管 / 卫健接口 |
-| 前端 | 暂未实现（预留，设计见「前端交互设计」） | uni-app（Vue 3 + TypeScript）：微信小程序 / H5 / App + SSE 事件推送 |
+| 前端 | 暂未实现（预留，设计见「前端交互设计」） | uni-app（Vue 3 + TypeScript）：App（成品） / H5（测试用） + 事件推送（App: WebSocket / H5: SSE） |
 
 ## 快速开始
 
@@ -111,14 +111,14 @@ uvicorn server.main:app --reload
 | `app/mock_gov/services.py` | 本地内存模拟并联办理 | 对接真实政务系统 |
 | `app/storage/repo.py` | 内存 / JSON 文件（跨进程查询进度） | PostgreSQL / MySQL |
 
-## 前端交互设计（Vue 3 + TypeScript，SSE 事件推送）
+## 前端交互设计（uni-app：Vue 3 + TypeScript，事件推送）
 
-前端形态为 **Vue 3 + TypeScript**：既能做网页，也为后续兼容 APP 留出空间。
+前端形态为 **uni-app（Vue 3 + TypeScript）**：**最终成品为 App**，H5 仅用于开发调试，微信小程序已弃用。
 进度看板要反映**真实办理进度**，因此不做“回放动画”（对办事人无意义），
 也不做前端轮询（空转多、有延迟），而是由后端**服务端推送**：
 
 ```
-前端 Vue 3（聊天 / 表单 / 进度看板）        后端 FastAPI + 编排层
+前端 uni-app（App 成品 / H5 测试）          后端 FastAPI + 编排层
         |  POST /apply  ------------------->  主 Agent 启动编排
         |                                       节点完成 / 部门子 Agent 回调
         |  <-- event: flow_node   {node, done, total}
@@ -142,7 +142,7 @@ uvicorn server.main:app --reload
 | `finished` | 最终 `flow` / `item_status` | 结束态 |
 | `error` | `code` / `message` | 提示并恢复界面 |
 
-> 说明：**前端尚未实现**；其依赖的编排事件出口（`MainAgent.run / query` 的可选 `on_event` 回调，`Event.to_dict()` 可直接序列化为 SSE `data`）已就绪，Web 层订阅即可。完整的工程结构、事件契约与接口定义见 `docs/07-前端交互设计.md`。
+> 说明：**前端尚未实现**；其依赖的编排事件出口（`MainAgent.run / query` 的可选 `on_event` 回调，`Event.to_dict()` 可直接序列化为事件 JSON）已就绪，服务层推送即可（App: WebSocket；H5: SSE）。完整的工程结构、事件契约与接口定义见 `docs/07-前端交互设计.md`。
 
 ## 工作总结与分工
 
@@ -151,7 +151,7 @@ uvicorn server.main:app --reload
 - 双场景骨架（开办企业 / 开办餐饮店）共用同一套编排框架。
 - 完整编排闭环：意图路由 → 咨询 → 信息采集 → 条件判定 → 材料核验 → 并联提交 → 进度查询。
 - 办理进度可推进：流程节点逐个“打勾”（意图识别 → … → 进度跟踪），并联事项由各部门事项子 Agent 办结后回调主 Agent 自动打勾，支持按单号查询进度看板。
-- 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 Vue 3 前端经 SSE 实时刷新进度预留。
+- 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 uni-app 前端实时刷新进度预留。
 - 配置化条件路由：面积、油烟、生食/冷食、招牌、银行开户、用工人数等按规则增减事项与材料。
 - MoMA 三大能力落点（多模型调度 / 智能路由 / 上下文管理），当前为桩实现。
 - Mock 政务并联办理与进度状态，冒烟测试一键验证。
@@ -178,7 +178,7 @@ uvicorn server.main:app --reload
 - [x] README / 设计文档 / GitHub 发布
 - [x] FastAPI 服务层 + 多轮会话改造
 - [ ] MoMA 真实 API 接入
-- [ ] 前端（uni-app：微信小程序 / H5 / App，协作 · 以 Anjie 为主）
+- [ ] 前端（uni-app：App（成品） / H5（测试用），协作 · 以 Anjie 为主）
 
 #### Anjie（组员）· 场景与业务
 
@@ -188,7 +188,7 @@ uvicorn server.main:app --reload
 - [x] 知识库桩（markdown 检索）
 - [x] 冒烟测试
 - [x] 进度状态推进（流程节点打勾 + 部门子 Agent 办结回调 + 编排事件出口）
-- [ ] 前端（uni-app，Vue 3 + TypeScript，微信小程序 / H5 / App，主负责 · Kevin 协作）
+- [ ] 前端（uni-app，Vue 3 + TypeScript，App（成品） / H5（测试用），主负责 · Kevin 协作）
 - [ ] 向量化知识库与 RAG
 - [ ] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
 
@@ -196,7 +196,7 @@ uvicorn server.main:app --reload
 
 - [x] 双场景骨架 + 完整编排闭环 + 条件路由
 - [x] 进度状态推进（让“办理进度”可变化）
-- [ ] uni-app 前端（Vue 3 + TypeScript，微信小程序 / H5 / App：聊天 + 动态表单 + 进度看板，SSE 事件推送，见「前端交互设计」）
+- [ ] uni-app 前端（Vue 3 + TypeScript，App（成品） / H5（测试用）：聊天 + 动态表单 + 进度看板，事件推送，见「前端交互设计」）
 - [ ] MoMA 真实 API 接入
 - [ ] 向量化知识库与 RAG 检索
 - [ ] 多模态材料核验
