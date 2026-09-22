@@ -53,6 +53,7 @@ one-stop-agent/
 ├── scenarios/               # 场景配置（事项、字段、条件规则）
 ├── data/knowledge/          # 办事指南知识库
 ├── docs/                    # 设计文档
+├── server/                 # FastAPI 服务层（多轮会话）
 ├── app/
 │   ├── moma/                # MoMA 客户端 + 上下文管理
 │   ├── agents/              # 五个子 Agent
@@ -86,6 +87,10 @@ python run_demo.py enterprise     # 只跑企业
 
 # 冒烟测试（无需 pytest）
 python tests/test_flow.py
+python tests/test_server_smoke.py   # 服务层多轮闭环
+
+# 启动 API（需先 pip install -r requirements.txt）
+uvicorn server.main:app --reload
 ```
 
 - 要求 Python 3.10+（已在 3.12 验证），核心运行仅用标准库。
@@ -115,7 +120,7 @@ python tests/test_flow.py
 - [x] MoMA 三能力落点（桩）
 - [x] 数据模型 / 存储 / 配置 / 演示入口
 - [x] README / 设计文档 / GitHub 发布
-- [ ] FastAPI 服务层 + 多轮会话改造
+- [x] FastAPI 服务层 + 多轮会话改造
 - [ ] MoMA 真实 API 接入
 - [ ] 移动端 / 小程序前端（uni-app，协作 · 以 Anjie 为主）
 
