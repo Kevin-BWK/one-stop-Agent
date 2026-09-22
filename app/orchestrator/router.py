@@ -8,8 +8,9 @@ INTENT_KEYWORDS = {
 
 
 def route_intent(text: str) -> str:
-    for intent, words in INTENT_KEYWORDS.items():
-        for w in words:
+    # 优先级：进度查询 > 咨询 > 办事；避免“办理进度”被“办”误路由到办事
+    for intent in ("query", "consult", "apply"):
+        for w in INTENT_KEYWORDS[intent]:
             if w in text:
                 return intent
     return "consult"

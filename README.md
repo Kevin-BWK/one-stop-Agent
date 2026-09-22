@@ -11,7 +11,7 @@
 ## 架构概览
 
 ```
-接入层   Vue 3 Web / APP 客户端（预留）
+接入层   uni-app 前端（Vue 3 + TypeScript）：微信小程序 · H5 · App（预留）
 编排层   MoMA 多 Agent 编排（主 Agent + 子 Agent 群，含各部门事项 Agent）
 能力层   MoMA：多模型调度 · 智能路由 · 上下文管理 · RAG · 工具调用
 模型层   九天大模型 + 生态模型（DeepSeek / Qwen / GLM / Qwen-VL）
@@ -55,6 +55,7 @@ one-stop-agent/
 ├── data/knowledge/          # 办事指南知识库
 ├── data/runtime/            # 运行时办理单（进度查询持久化，自动生成）
 ├── docs/                    # 设计文档
+├── server/                  # FastAPI 服务层（多轮会话）
 ├── app/
 │   ├── moma/                # MoMA 客户端 + 上下文管理
 │   ├── agents/              # 子 Agent（咨询/采集/判定/核验/部门事项/进度）
@@ -76,7 +77,7 @@ one-stop-agent/
 | 知识检索 | 整篇 markdown 返回 | 向量库 + Embedding（BGE 等）RAG |
 | 上下文 / 数据 | `SessionContext` / `InMemoryRepo` 内存 | Redis + PostgreSQL / MySQL |
 | 政务集成 | `MockGovServices` 本地模拟 | 市场监管 / 税务 / 消防 / 城管 / 卫健接口 |
-| 前端 | 暂未实现（预留，设计见「前端交互设计」） | Vue 3 + TypeScript（Web，可打包 APP）+ SSE 事件推送 |
+| 前端 | 暂未实现（预留，设计见「前端交互设计」） | uni-app（Vue 3 + TypeScript）：微信小程序 / H5 / App + SSE 事件推送 |
 
 ## 快速开始
 
@@ -91,6 +92,10 @@ python run_demo.py --query YJS0001
 
 # 冒烟测试（无需 pytest）
 python tests/test_flow.py
+python tests/test_server_smoke.py   # 服务层多轮会话闭环（零第三方依赖）
+
+# 启动 API（需先 pip install -r requirements.txt）
+uvicorn server.main:app --reload
 ```
 
 - 要求 Python 3.10+（已在 3.12 验证），核心运行仅用标准库。
@@ -159,11 +164,39 @@ python tests/test_flow.py
 | Kevin（组长） | 架构与编排 | 总体架构设计、主 Agent 编排与意图路由、MoMA 三能力落点、项目统筹与文档、GitHub 发布 |
 | Anjie（组员） | 场景与业务 | 五个子 Agent 实现、场景 JSON 与条件路由规则、Mock 政务与知识库桩、冒烟测试 |
 
+### 子路线图（分工自查）
+
+> 已完成标记 `[x]`，未完成标记 `[ ]`；两端工作量保持均衡，可逐项自查。
+> 本分工已定稿，后续变更不再调整分工。
+
+#### Kevin（组长）· 架构与编排
+
+- [x] 总体架构设计 + 双场景共用框架
+- [x] 主 Agent 编排 + 意图路由
+- [x] MoMA 三能力落点（桩）
+- [x] 数据模型 / 存储 / 配置 / 演示入口
+- [x] README / 设计文档 / GitHub 发布
+- [x] FastAPI 服务层 + 多轮会话改造
+- [ ] MoMA 真实 API 接入
+- [ ] 前端（uni-app：微信小程序 / H5 / App，协作 · 以 Anjie 为主）
+
+#### Anjie（组员）· 场景与业务
+
+- [x] 五个子 Agent 实现
+- [x] 场景 JSON + 条件路由规则
+- [x] Mock 政务并联办理
+- [x] 知识库桩（markdown 检索）
+- [x] 冒烟测试
+- [x] 进度状态推进（流程节点打勾 + 部门子 Agent 办结回调 + 编排事件出口）
+- [ ] 前端（uni-app，Vue 3 + TypeScript，微信小程序 / H5 / App，主负责 · Kevin 协作）
+- [ ] 向量化知识库与 RAG
+- [ ] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
+
 ## 路线图
 
 - [x] 双场景骨架 + 完整编排闭环 + 条件路由
 - [x] 进度状态推进（让“办理进度”可变化）
-- [ ] Vue 3 + TypeScript 前端（聊天 + 动态表单 + 进度看板，SSE 事件推送，见「前端交互设计」）
+- [ ] uni-app 前端（Vue 3 + TypeScript，微信小程序 / H5 / App：聊天 + 动态表单 + 进度看板，SSE 事件推送，见「前端交互设计」）
 - [ ] MoMA 真实 API 接入
 - [ ] 向量化知识库与 RAG 检索
 - [ ] 多模态材料核验
