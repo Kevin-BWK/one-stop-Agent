@@ -91,11 +91,8 @@ class AgentService:
         rec = self._get(session_id)
         spec = self._field_spec(rec, key)
         if spec is None:
-            return self._state(rec, message=f"未知字段：{key}", intent="apply")
-        try:
-            value = self._coerce(spec, value)
-        except ValueError as e:
-            return self._state(rec, message=str(e), intent="apply")
+            raise KeyError(f"未知字段：{key}")
+        value = self._coerce(spec, value)
         rec.form.fields[key] = value
         rec.context.set(key, value)
         q = self._next_question(rec)
