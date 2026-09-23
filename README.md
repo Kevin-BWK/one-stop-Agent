@@ -50,12 +50,14 @@
 
 ```
 one-stop-agent/
+├── dev.ps1 / dev.bat        # 一键启动开发环境（后端 + 前端 H5，自动开浏览器）
 ├── run_demo.py              # 最小可运行演示入口（含进度查询）
+├── frontend/                # uni-app 前端（Vue 3 + TS；成品为 App，H5 仅调试）
+├── server/                  # FastAPI 服务层（多轮会话 + 事件流）
 ├── scenarios/               # 场景配置（事项、字段、条件规则）
 ├── data/knowledge/          # 办事指南知识库
-├── data/runtime/            # 运行时办理单（进度查询持久化，自动生成）
+├── data/runtime/            # 运行时办理单与日志（自动生成，已忽略）
 ├── docs/                    # 设计文档
-├── server/                  # FastAPI 服务层（多轮会话）
 ├── app/
 │   ├── moma/                # MoMA 客户端 + 上下文管理
 │   ├── agents/              # 子 Agent（咨询/采集/判定/核验/部门事项/进度）
@@ -96,11 +98,16 @@ python tests/test_server_smoke.py   # 服务层多轮会话闭环（零第三方
 
 # 启动 API（需先 pip install -r requirements.txt）
 uvicorn server.main:app --reload
+
+# 一键启动开发环境：后端 + uni-app H5 调试端，就绪后自动打开浏览器
+dev.bat                     # Windows 双击即可；等价于 powershell -ExecutionPolicy Bypass -File dev.ps1
+dev.bat -Stop               # 停止前后端
 ```
 
 - 要求 Python 3.10+（已在 3.12 验证），核心运行仅用标准库。
 - Windows 若无 `python` 命令，可改用 `py` 启动器，如 `py -3 run_demo.py`。
 - 接入 Web 前端 / 真实 MoMA 时再安装：`pip install -r requirements.txt`。
+- 前端调试端：uni-app（Vue 3 + TS）H5，默认 http://127.0.0.1:5173/ ；首次运行 `dev.bat` 会自动 `npm install`，需 Node 18+。
 
 ## 桩实现 → 真实接入
 
