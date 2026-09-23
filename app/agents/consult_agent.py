@@ -18,6 +18,7 @@ class ConsultAgent(BaseAgent):
             messages,
             fallback="[" + model + "] " + local,
             context=self.context,
+            role=self.role,
         )
         self.context.add_history("user", question)
         self.context.add_history("assistant", reply)

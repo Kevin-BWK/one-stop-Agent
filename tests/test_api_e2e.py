@@ -3,11 +3,14 @@
 依赖：pip install -r requirements.txt httpx
 用法：python tests/test_api_e2e.py
 """
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+os.environ.setdefault("MOMA_DISABLE_LIVE", "1")  # 测试离线运行，避免真实调用
 
 from fastapi.testclient import TestClient
 

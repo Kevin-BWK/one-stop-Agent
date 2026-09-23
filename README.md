@@ -149,28 +149,50 @@ uvicorn server.main:app --reload
 
 `app/moma/client.py` 支持“桩 / 真实”一键切换，业务代码无需改动：
 
-- **未配置环境变量** → 桩模式：本地模拟回复，Demo 与单测可离线运行。
-- **配置环境变量** → 真实模式：调用 OpenAI 兼容接口 `POST {MOMA_API_BASE}/chat/completions`，5xx / 429 自动重试，失败时可用本地回退。
+- **未配置** → 桩模式：本地模拟回复，Demo 与单测可离线运行。
+- **配置后** → 真实模式：调用 OpenAI 兼容接口 `POST {API_BASE}/chat/completions`，5xx / 429 自动重试，失败时回退本地文案。
+
+采用**主 / 子两套端点与模型**，对应 MoMA 的多模型调度：
+
+| 角色 | 用途 | 环境变量 |
+| --- | --- | --- |
+| 主 Agent | 咨询等主流程推理 | `MOMA_MAIN_API_BASE` / `MOMA_MAIN_API_KEY` / `MOMA_MAIN_MODEL` |
+| 子 Agent | 部门事项子 Agent 办理回执 | `MOMA_SUB_API_BASE` / `MOMA_SUB_API_KEY` / `MOMA_SUB_MODEL` |
+
+通用变量：
 
 | 环境变量 | 说明 |
 | --- | --- |
-| `MOMA_API_BASE` | 服务地址，例如 `https://moma.example.com/v1` |
-| `MOMA_API_KEY` | 访问密钥（Bearer） |
 | `MOMA_TIMEOUT` | 超时秒数，默认 30 |
 | `MOMA_MAX_RETRIES` | 失败重试次数，默认 2 |
-| `MOMA_MODEL_STRONG` / `_LIGHT` / `_VISION` / `_RULE` | 按需覆盖模型池 |
+| `MOMA_DISABLE_LIVE` | 设为 `1` 时忽略环境变量、强制桩模式（测试 / 离线演示用） |
+| `MOMA_MODEL_STRONG` / `_LIGHT` / `_VISION` / `_RULE` | 未配置角色模型时，按任务覆盖内置模型池 |
+| `MOMA_API_BASE` / `MOMA_API_KEY` | 兼容旧用法：作为主角色的回退配置 |
+
+**密钥安全（重要）**
+
+- 密钥写入项目根目录 `.env`；该文件**已在 `.gitignore` 中，切勿提交**。
+- 也可改用系统环境变量，**环境变量优先于 `.env`**。
+- 对外输出（`describe()` / `/health`）**从不包含密钥**。
 
 ```powershell
-# Windows PowerShell：配置后即走真实 MoMA
-$env:MOMA_API_BASE = "https://moma.example.com/v1"
-$env:MOMA_API_KEY  = "<你的密钥>"
-python run_demo.py restaurant
+# 方式一（推荐）：在项目根目录建 .env（不进版本库）
+#   MOMA_MAIN_API_BASE=https://<主端点>/v1
+#   MOMA_MAIN_API_KEY=<主密钥>
+#   MOMA_MAIN_MODEL=deepseek-v4-flash-0731
+#   MOMA_SUB_API_BASE=https://<子端点>/v1
+#   MOMA_SUB_API_KEY=<子密钥>
+#   MOMA_SUB_MODEL=zhipu/glm-5.3-flash
 
-# 健康检查会返回当前模式（需先启动服务）
-curl.exe http://127.0.0.1:8000/health   # {"status":"ok","moma":"live"}
+python run_demo.py restaurant          # 自动读取 .env，走真实模型
+curl.exe http://127.0.0.1:8000/health  # {"status":"ok","moma":"live"}
+
+# 方式二：临时用环境变量（示例，勿写进代码或提交）
+$env:MOMA_MAIN_API_BASE = "https://<主端点>/v1"
+$env:MOMA_MAIN_API_KEY  = "<主密钥>"
 ```
 
-> 未拿到真实凭证时保持桩模式即可；配置后无需修改任何业务代码。
+> 未配置时自动回退桩模式；配置后无需修改任何业务代码。
 
 ## 工作总结与分工
 
