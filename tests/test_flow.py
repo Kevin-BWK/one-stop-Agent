@@ -1,10 +1,13 @@
 """冒烟测试：验证两个场景闭环、办理流程节点打勾与并联进度推进，无需 pytest。"""
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+os.environ.setdefault("MOMA_DISABLE_LIVE", "1")  # 测试离线运行，避免真实调用
 
 from app.knowledge.retriever import KnowledgeBase
 from app.moma.client import MoMAClient

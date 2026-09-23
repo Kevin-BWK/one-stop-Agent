@@ -2,11 +2,14 @@
 
 用法：python tests/test_server_smoke.py
 """
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+os.environ.setdefault("MOMA_DISABLE_LIVE", "1")  # 测试离线运行，避免真实调用
 
 from server.service import AgentService
 
