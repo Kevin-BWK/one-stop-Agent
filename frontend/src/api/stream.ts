@@ -11,6 +11,8 @@ export interface ApplyPayload {
   scenario_id: string
   utterance: string
   answers: Record<string, any>
+  /** 材料收集单号：带上表示材料已提交齐备，编排从「材料核验」续跑 */
+  intake_id?: string
 }
 
 export interface StreamHandlers {
@@ -35,6 +37,9 @@ function subscribeBySse(payload: ApplyPayload, handlers: StreamHandlers) {
     utterance: payload.utterance,
     answers: JSON.stringify(payload.answers)
   })
+  if (payload.intake_id) {
+    query.set('intake_id', payload.intake_id)
+  }
 
   let closed = false
   let source: EventSource
@@ -75,12 +80,25 @@ function subscribeBySse(payload: ApplyPayload, handlers: StreamHandlers) {
   return close
 }
 
+/**
+ * `uni.connectSocket` 的类型声明与实际运行时不符（声明为 Promise，
+ * 实际返回 SocketTask），这里按真实返回收窄，避免整块代码报类型错误。
+ */
+type SocketTask = {
+  send(options: { data: string }): void
+  close(options?: Record<string, any>): void
+  onOpen(callback: () => void): void
+  onMessage(callback: (res: { data: string }) => void): void
+  onError(callback: (error: any) => void): void
+  onClose(callback: () => void): void
+}
+
 /** App：WebSocket */
 function subscribeBySocket(payload: ApplyPayload, handlers: StreamHandlers) {
   const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://'
   const task = uni.connectSocket({
     url: scheme + location.host + '/ws/apply'
-  })
+  }) as unknown as SocketTask
 
   let closed = false
   const close = () => {

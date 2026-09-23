@@ -65,3 +65,101 @@ class CaseRecord:
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
         )
+
+
+@dataclass
+class MaterialFile:
+    """一份材料下用户已提交的单个文件。
+
+    落盘位置：data/runtime/materials/{intake_id}/{material_id}/{stored_name}
+    """
+    file_id: str
+    slot: str               # 具名槽位（如"正面"）；多页材料为空串
+    filename: str           # 用户原始文件名（仅用于展示）
+    stored_name: str        # 实际落盘文件名
+    size: int
+    content_type: str = ""
+    status: str = ""        # 已通过 / 需补正
+    reason: str = ""        # 需补正原因（对用户可见的自然语言）
+    uploaded_at: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "file_id": self.file_id,
+            "slot": self.slot,
+            "filename": self.filename,
+            "stored_name": self.stored_name,
+            "size": self.size,
+            "content_type": self.content_type,
+            "status": self.status,
+            "reason": self.reason,
+            "uploaded_at": self.uploaded_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MaterialFile":
+        return cls(
+            file_id=data["file_id"],
+            slot=data.get("slot", ""),
+            filename=data.get("filename", ""),
+            stored_name=data.get("stored_name", ""),
+            size=int(data.get("size") or 0),
+            content_type=data.get("content_type", ""),
+            status=data.get("status", ""),
+            reason=data.get("reason", ""),
+            uploaded_at=data.get("uploaded_at", ""),
+        )
+
+
+@dataclass
+class MaterialIntake:
+    """材料收集单：受理**之前**收集材料的凭据。
+
+    与办理单 CaseRecord 解耦：材料清单依赖条件判定，判定又发生在提交之前，
+    因此材料先落在 intake 上，材料齐了才由 /apply 生成办理单。
+    """
+    intake_id: str
+    scenario_id: str
+    form: ApplicationForm
+    items: List[str] = field(default_factory=list)
+    materials: List[str] = field(default_factory=list)   # 材料 id（条件判定的产物）
+    notes: List[str] = field(default_factory=list)
+    files: Dict[str, List[MaterialFile]] = field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""
+
+    def files_of(self, material_id: str) -> List[MaterialFile]:
+        return list(self.files.get(material_id) or [])
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "intake_id": self.intake_id,
+            "scenario_id": self.scenario_id,
+            "form": self.form.to_dict(),
+            "items": list(self.items),
+            "materials": list(self.materials),
+            "notes": list(self.notes),
+            "files": {
+                material_id: [item.to_dict() for item in group]
+                for material_id, group in self.files.items()
+            },
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MaterialIntake":
+        files: Dict[str, List[MaterialFile]] = {}
+        for material_id, group in (data.get("files") or {}).items():
+            files[material_id] = [MaterialFile.from_dict(item) for item in group]
+        return cls(
+            intake_id=data["intake_id"],
+            scenario_id=data.get("scenario_id", ""),
+            form=ApplicationForm.from_dict(data.get("form")),
+            items=list(data.get("items") or []),
+            materials=list(data.get("materials") or []),
+            notes=list(data.get("notes") or []),
+            files=files,
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+        )

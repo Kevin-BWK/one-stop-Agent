@@ -1,7 +1,26 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
 import { useCaseStore } from '@/stores/case'
+import type { CollectField } from '@/types/contract'
 
 const store = useCaseStore()
+
+const missingText = computed(() =>
+  store.missingFields.map((field) => field.label).join('、')
+)
+
+/** 必填但未填：红框提示 */
+function isMissing(field: CollectField): boolean {
+  if (!field.required) {
+    return false
+  }
+  const value = store.answers[field.key]
+  if (value === null || value === undefined) {
+    return true
+  }
+  return typeof value === 'string' && value.trim() === ''
+}
 
 function onText(key: string, event: any) {
   store.setAnswer(key, event.detail.value)
@@ -20,7 +39,7 @@ function onBool(key: string, event: any) {
   <view class="form">
     <view class="form__head">
       <text class="form__title">申请信息</text>
-      <text class="form__sub">按场景配置自动渲染</text>
+      <text class="form__sub">带 * 的为必填</text>
     </view>
 
     <view class="form__body">
@@ -42,6 +61,7 @@ function onBool(key: string, event: any) {
         <input
           v-if="field.type === 'text'"
           class="field__input"
+          :class="{ 'field__input--error': isMissing(field) }"
           :value="store.answers[field.key]"
           :disabled="store.running"
           placeholder="请输入"
@@ -51,6 +71,7 @@ function onBool(key: string, event: any) {
         <input
           v-else-if="field.type === 'number'"
           class="field__input"
+          :class="{ 'field__input--error': isMissing(field) }"
           type="number"
           :value="store.answers[field.key]"
           :disabled="store.running"
@@ -65,7 +86,7 @@ function onBool(key: string, event: any) {
           :disabled="store.running"
           @change="onEnum(field.key, field.options || [], $event)"
         >
-          <view class="field__picker-box">
+          <view class="field__picker-box" :class="{ 'field__input--error': isMissing(field) }">
             <text
               class="field__value"
               :class="{ 'field__value--empty': !store.answers[field.key] }"
@@ -75,6 +96,10 @@ function onBool(key: string, event: any) {
             <text class="field__arrow">▾</text>
           </view>
         </picker>
+      </view>
+
+      <view v-if="store.missingFields.length" class="form__hint">
+        <text>还有 {{ store.missingFields.length }} 项必填未填：{{ missingText }}</text>
       </view>
     </view>
   </view>
@@ -151,6 +176,11 @@ function onBool(key: string, event: any) {
   border-radius: 8px;
 }
 
+.field__input--error {
+  background: #fff7f7;
+  border-color: #f5a3a3;
+}
+
 .field__picker {
   width: 100%;
 }
@@ -183,5 +213,16 @@ function onBool(key: string, event: any) {
 
 .field__switch {
   transform: scale(0.86);
+}
+
+.form__hint {
+  margin-top: 12px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
 }
 </style>

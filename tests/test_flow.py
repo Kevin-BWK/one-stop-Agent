@@ -82,7 +82,7 @@ def test_enterprise_flow():
     case = _run("enterprise_open", ENTERPRISE_ANSWERS)
     assert case.case_id.startswith("YJS")
     assert "D_bank" in case.items  # 预约开户
-    assert "用工备案材料" in case.materials  # 10 人 -> 用工备案
+    assert "labor_filing" in case.materials  # 10 人 -> 用工备案
 
 
 def test_flow_nodes_all_checked():
