@@ -43,8 +43,11 @@
 编排闭环：
 
 ```
-意图路由 → 咨询 → 信息采集 → 条件判定 → 材料核验 → 并联提交 → 各部门事项办理 → 进度查询
+意图路由 → 咨询 → 信息采集 → 条件判定 → 材料提交与核验 → 并联提交 → 各部门事项办理 → 进度查询
 ```
+
+其中「材料提交与核验」发生在**受理之前**：条件判定先算出要交哪些材料，
+用户逐项拍照 / 选文件上传并通过核验后，才允许并联提交（见 `docs/09`）。
 
 ## 目录结构
 
@@ -54,14 +57,15 @@ one-stop-agent/
 ├── run_demo.py              # 最小可运行演示入口（含进度查询）
 ├── frontend/                # uni-app 前端（Vue 3 + TS；成品为 App，H5 仅调试）
 ├── server/                  # FastAPI 服务层（多轮会话 + 事件流）
-├── scenarios/               # 场景配置（事项、字段、条件规则）
+├── scenarios/               # 场景配置（事项、材料条目、字段、条件规则）
 ├── data/knowledge/          # 办事指南知识库
-├── data/runtime/            # 运行时办理单与日志（自动生成，已忽略）
+├── data/runtime/            # 运行时办理单、材料文件与日志（自动生成，已忽略）
 ├── docs/                    # 设计文档
 ├── app/
 │   ├── moma/                # MoMA 客户端 + 上下文管理
 │   ├── agents/              # 子 Agent（咨询/采集/判定/核验/部门事项/进度）
 │   ├── orchestrator/        # 主 Agent 编排 + 意图路由 + 办理流程进度 + 编排事件（flow.py / events.py）
+│   ├── materials/           # 材料清单规则、落盘存储、上传通道与核验（spec / store / verify / service）
 │   ├── knowledge/           # 知识检索
 │   ├── mock_gov/            # 政务系统 Mock（并联办理与状态推进）
 │   ├── models/              # 数据模型
@@ -94,6 +98,7 @@ python run_demo.py --query YJS0001
 
 # 冒烟测试（无需 pytest）
 python tests/test_flow.py
+python tests/test_materials.py      # 材料提交链路：清单 / 槽位 / 核验 / 补正 / 撤回 / 受理拦截
 python tests/test_server_smoke.py   # 服务层多轮会话闭环（零第三方依赖）
 
 # 启动 API（需先 pip install -r requirements.txt）
@@ -117,10 +122,19 @@ dev.bat -Stop               # 停止前后端
 | `app/knowledge/retriever.py` | 整篇返回 markdown 指南 | 向量检索 / RAG |
 | `app/mock_gov/services.py` | 本地内存模拟并联办理 | 对接真实政务系统 |
 | `app/storage/repo.py` | 内存 / JSON 文件（跨进程查询进度） | PostgreSQL / MySQL |
+| `app/agents/consult_agent.py` | 拼固定话术 | MoMA 对话模型（见 `docs/08`） |
+| `app/agents/verify_agent.py` | 形式校验 + 一条可解释的桩内容核验（图片过小判为“需补正”），**不读真实图像内容** | MoMA 多模态识别 + 规则校验（见 `docs/09`） |
+| `app/agents/item_agent.py` | 直接返回“已办结” | 调用各部门政务系统，异步回调（见 `docs/06`） |
+| `app/materials/store.py` | 材料与文件落本地磁盘 `data/runtime/materials/` | 对象存储（OSS / COS）+ 文件编号 |
+| 电子证照共享 | **未做**（所有材料都要求上传） | 对接本地电子证照库，材料条目加 `source` 字段（见 `docs/09`） |
 
 ## 前端交互设计（uni-app：Vue 3 + TypeScript，事件推送）
 
 前端形态为 **uni-app（Vue 3 + TypeScript）**：**最终成品为 App**，H5 仅用于开发调试，微信小程序已弃用。
+
+交互形态是**对话式办理**：聊天区可输入、可随时插问，表单与对话共享同一份数据；材料在独立区域提交，
+提交前做必填校验；Agent 回复一律**自然语言**，不出现 JSON 字面量或内部事项 id。
+详见 `docs/08-对话交互设计.md` 与 `docs/09-材料提交与核验设计.md`。
 进度看板要反映**真实办理进度**，因此不做“回放动画”（对办事人无意义），
 也不做前端轮询（空转多、有延迟），而是由后端**服务端推送**：
 
@@ -136,6 +150,7 @@ dev.bat -Stop               # 停止前后端
 
 - **进度是真实办理进度**：后端每完成一个节点 / 每收到一次部门子 Agent 回调，立即推一条事件，看板增量刷新——进度零延迟、无空转。
 - **动态表单**：表单区消费 `scenarios/*.json` 的 `collect_fields` 自动渲染控件，新增“一件事”不改前端。
+- **材料区**：清单、槽位与张数上限全部由后端下发（`GET /api/materials/{intake_id}`），前端只负责渲染与发起拍照 / 选文件；上传走 `uni.uploadFile`（multipart），材料齐备后才允许开始办理（见 `docs/09`）。
 - **事件负载复用现有结构**：`flow_node` 取 `FlowProgress.snapshot()`，`item_done` 取部门回调结果，`case_created` / `finished` 取 `CaseRecord`。
 
 事件与前端处理的对应：
@@ -156,8 +171,10 @@ dev.bat -Stop               # 停止前后端
 ### 已完成工作
 
 - 双场景骨架（开办企业 / 开办餐饮店）共用同一套编排框架。
-- 完整编排闭环：意图路由 → 咨询 → 信息采集 → 条件判定 → 材料核验 → 并联提交 → 进度查询。
+- 完整编排闭环：意图路由 → 咨询 → 信息采集 → 条件判定 → 材料提交与核验 → 并联提交 → 进度查询。
 - 办理进度可推进：流程节点逐个“打勾”（意图识别 → … → 进度跟踪），并联事项由各部门事项子 Agent 办结后回调主 Agent 自动打勾，支持按单号查询进度看板。
+- 材料提交与核验：材料条目化（含“为什么交 / 怎么给 / 格式 / 槽位”），支持拍照 / 相册 / 选文件逐项上传，形式校验 + 桩内容核验，需补正可原地重传，必交材料全部通过才允许并联提交（见 `docs/09`）。
+- 受理入口统一：表单式（`/apply`）与对话式（`/api/session` + `/api/chat` + `/api/fields`）两条路径**共用同一套 `MainAgent` 编排与材料提交**；多轮会话只负责采集与材料清单，不再自行受理（见 `docs/09`）。
 - 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 uni-app 前端实时刷新进度预留。
 - 配置化条件路由：面积、油烟、生食/冷食、招牌、银行开户、用工人数等按规则增减事项与材料。
 - MoMA 三大能力落点（多模型调度 / 智能路由 / 上下文管理），当前为桩实现。
@@ -195,6 +212,7 @@ dev.bat -Stop               # 停止前后端
 - [x] 知识库桩（markdown 检索）
 - [x] 冒烟测试
 - [x] 进度状态推进（流程节点打勾 + 部门子 Agent 办结回调 + 编排事件出口）
+- [x] 材料提交与核验（材料清单 / 逐项上传与核验 / 补正闭环 / 受理前置校验，见 `docs/09`）
 - [ ] 前端（uni-app，Vue 3 + TypeScript，App（成品） / H5（测试用），主负责 · Kevin 协作）
 - [ ] 向量化知识库与 RAG
 - [ ] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
@@ -204,6 +222,9 @@ dev.bat -Stop               # 停止前后端
 - [x] 双场景骨架 + 完整编排闭环 + 条件路由
 - [x] 进度状态推进（让“办理进度”可变化）
 - [ ] uni-app 前端（Vue 3 + TypeScript，App（成品） / H5（测试用）：聊天 + 动态表单 + 进度看板，事件推送，见「前端交互设计」）
+- [ ] 对话式办理（聊天区可输入、多轮上下文、随时插问，见 `docs/08`）
+- [x] 材料提交与核验（材料清单 + 逐项上传核验 + 补正闭环 + 受理前置校验，见 `docs/09`）
+- [ ] 提交前置校验 + 文案自然语言化（去掉 JSON 字面量与内部 id，见 `docs/08`）
 - [ ] MoMA 真实 API 接入
 - [ ] 向量化知识库与 RAG 检索
 - [ ] 多模态材料核验

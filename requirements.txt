@@ -2,4 +2,5 @@
 fastapi>=0.110
 uvicorn>=0.27
 pydantic>=2.6
+python-multipart>=0.0.9   # FastAPI 解析材料上传（multipart/form-data）所需
 requests>=2.31

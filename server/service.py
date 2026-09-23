@@ -1,12 +1,17 @@
 """多轮会话服务：把多 Agent 编排包装成可多轮驱动的状态机。
 
-阶段一目标：
-1. 会话与场景绑定（session_id -> scenario）
-2. 意图路由：咨询 / 办理 / 进度
-3. 字段逐项采集，采齐后自动条件判定 -> 核验 -> 并联提交
-4. 进度查询
+职责边界（重要）：
+- 本服务只管**会话状态机**：会话与场景绑定、意图路由、字段逐项采集追问、材料清单产出、进度查询；
+- **实际的办理（流程节点打勾、并联提交、各部门办结）统一由 `MainAgent` 跑**，
+  入口是 `/apply`（带 `intake_id`）。本服务不再自己 `gov.submit`，
+  否则两条路径会产出质量不一致的办理单（一条有流程节点与核验记录，一条没有）。
 
-说明：CLI 的 MainAgent.run 仍保留为一次性演示入口；本服务提供 App 所需的多轮能力。
+因此多轮办理的完整链路是：
+
+    POST /api/session           建会话
+    POST /api/fields   × N      逐项采集；最后一项返回 intake_id + 材料清单
+    POST /api/materials/...     逐项上传材料
+    POST /apply {intake_id}     跑完整编排，返回事件流
 """
 import json
 from dataclasses import dataclass
@@ -16,13 +21,14 @@ from typing import Any, Dict, List, Optional
 from app.agents.condition_agent import ConditionAgent
 from app.agents.consult_agent import ConsultAgent
 from app.agents.progress_agent import ProgressAgent
-from app.agents.verify_agent import VerifyAgent
 from app.config import ROOT
 from app.knowledge.retriever import KnowledgeBase
+from app.materials.service import MaterialService
+from app.materials.store import get_store
 from app.moma.client import MoMAClient
 from app.moma.context import SessionContext
 from app.mock_gov.services import MockGovServices
-from app.models.schema import ApplicationForm, CaseRecord
+from app.models.schema import ApplicationForm, CaseRecord, MaterialIntake
 from app.orchestrator.router import route_intent
 from app.storage.repo import InMemoryRepo
 
@@ -35,19 +41,23 @@ class SessionRecord:
     context: SessionContext
     form: ApplicationForm
     agents: Dict[str, Any]
+    # 字段采齐后先产出材料清单（此时**尚未受理**）；材料齐备才由 /apply 生成 case
+    intake: Optional[MaterialIntake] = None
+    planned: bool = False
     case: Optional[CaseRecord] = None
-    submitted: bool = False
 
 
 class AgentService:
     """按 session 管理多轮办事流程的服务对象。"""
 
-    def __init__(self, root: Optional[Path] = None):
+    def __init__(self, root: Optional[Path] = None, store=None):
         self.root = Path(root) if root else ROOT
         self.moma = MoMAClient()
         self.knowledge = KnowledgeBase(self.root / "data" / "knowledge")
         self.gov = MockGovServices()
         self.repo = InMemoryRepo()
+        # 默认用进程内共享的材料存储；测试可传入隔离的 store
+        self.materials = MaterialService(store=store or get_store(), moma=self.moma)
         self.sessions: Dict[str, SessionRecord] = {}
         self._seq = 0
 
@@ -83,9 +93,12 @@ class AgentService:
             reply = rec.agents["consult"].answer(message, rec.scenario)
             return self._state(rec, message=reply, intent=intent)
         # apply
-        q = self._next_question(rec)
-        msg = "开始办理，请按提示逐步填写信息。" if q else "信息已填写完成，可直接提交办理。"
-        return self._state(rec, message=msg, intent=intent)
+        if rec.planned:
+            return self._state(rec, message="材料清单已经生成，先把材料交齐，通过后就能开始办理。",
+                               intent=intent)
+        if self._next_question(rec) is None:
+            return self._plan(rec)
+        return self._state(rec, message="开始办理，请按提示逐步填写信息。", intent=intent)
 
     def submit_field(self, session_id: str, key: str, value: Any) -> dict:
         rec = self._get(session_id)
@@ -98,7 +111,7 @@ class AgentService:
         q = self._next_question(rec)
         if q is not None:
             return self._state(rec, message=f"已记录「{spec.get('label', key)}」。", intent="apply")
-        return self._finalize(rec)
+        return self._plan(rec)
 
     def get_session(self, session_id: str) -> dict:
         return self._state(self._get(session_id))
@@ -107,12 +120,21 @@ class AgentService:
         case = self.repo.get_case(case_id)
         return self._case_dict(case) if case else None
 
+    def attach_case(self, session_id: str, case: Optional[CaseRecord]) -> None:
+        """把 `/apply` 生成的办理单挂回会话。
+
+        办理由 `/apply` 跑，所以本服务拿不到 case；由调用方在编排结束后回填，
+        这样多轮会话里的"进度查询"仍然可用。
+        """
+        rec = self.sessions.get(session_id)
+        if rec is not None and case is not None:
+            rec.case = case
+
     # ---------- 内部逻辑 ----------
     def _make_agents(self, context: SessionContext) -> Dict[str, Any]:
         return {
             "consult": ConsultAgent(self.moma, context),
             "condition": ConditionAgent(self.moma, context),
-            "verify": VerifyAgent(self.moma, context),
             "progress": ProgressAgent(self.moma, context),
         }
 
@@ -129,7 +151,7 @@ class AgentService:
         return rec
 
     def _next_question(self, rec: SessionRecord) -> Optional[dict]:
-        if rec.submitted:
+        if rec.planned:
             return None
         for spec in rec.scenario["collect_fields"]:
             if spec["key"] not in rec.form.fields:
@@ -170,18 +192,27 @@ class AgentService:
             return value
         return "" if value is None else str(value)
 
-    def _finalize(self, rec: SessionRecord) -> dict:
-        scenario = rec.scenario
-        items, materials, notes = rec.agents["condition"].evaluate(scenario, rec.form)
-        rec.context.set("items", items)
-        rec.context.set("materials", materials)
-        report = rec.agents["verify"].verify(materials)
-        case = self.gov.submit(scenario["id"], items, materials, rec.form)
-        self.repo.save_case(case)
-        rec.case = case
-        rec.submitted = True
-        note_text = "；".join(notes) if notes else "无特殊条件"
-        msg = f"办理单 {case.case_id} 已生成并并联提交。判定说明：{note_text}。"
+    def _plan(self, rec: SessionRecord) -> dict:
+        """信息采齐 -> 产出材料清单（此时**尚未受理**）。
+
+        受理与并联办理统一交给 `/apply` 驱动 `MainAgent` 完成，
+        本服务不再自己 `gov.submit`——否则这里的办理单会缺流程节点、
+        缺核验记录，并联事项也会永远停在"已受理"。
+        """
+        if not rec.planned:
+            items, materials, notes = rec.agents["condition"].evaluate(rec.scenario, rec.form)
+            rec.context.set("items", items)
+            rec.context.set("materials", materials)
+            rec.intake = self.materials.plan_from_form(
+                rec.scenario, rec.form, items, materials, notes)
+            rec.planned = True
+
+        intake = rec.intake
+        msg = "信息已收齐。"
+        if intake.notes:
+            msg += "其中：" + "；".join(intake.notes) + "。"
+        msg += ("需要提交 " + str(len(intake.materials)) + " 份材料，材料没通过前无法受理。\n\n"
+                + self.materials.brief(rec.scenario, intake))
         return self._state(rec, message=msg, intent="apply")
 
     def _state(self, rec: SessionRecord, message: str = "", intent: str = "") -> dict:
@@ -194,6 +225,8 @@ class AgentService:
             "next_question": self._next_question(rec),
             "items": rec.context.get("items", []),
             "materials": rec.context.get("materials", []),
+            "intake_id": rec.intake.intake_id if rec.intake else "",
+            "material_view": self.materials.view(rec.scenario, rec.intake) if rec.intake else None,
             "case": self._case_dict(rec.case),
             "progress": self._progress_list(rec),
         }

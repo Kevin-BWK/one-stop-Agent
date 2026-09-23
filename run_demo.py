@@ -78,9 +78,12 @@ def demo(scenario_id, answers):
     print_trace(trace)
     print("")
     print("-" * 60)
+    items_map = scenario["items"]
+    materials_map = scenario.get("materials", {})
     print("办理单号：" + case.case_id)
-    print("并联事项：" + "、".join(case.items))
-    print("材料清单：" + "、".join(case.materials))
+    print("并联事项：" + "、".join(items_map.get(item, {}).get("name", item) for item in case.items))
+    print("材料清单：" + "、".join(
+        materials_map.get(mid, {}).get("name", mid) for mid in case.materials))
     print("")
     print("提示：办理单已落盘，可执行  python run_demo.py --query " + case.case_id + "  查询进度。")
     return case

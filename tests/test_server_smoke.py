@@ -1,14 +1,25 @@
 """服务层冒烟测试：验证多轮会话闭环（无需 FastAPI / pytest）。
 
+链路：建会话 -> 逐字段采集 -> 产出材料清单 -> 上传材料 -> 跑编排 -> 会话内查进度。
+
+要点：服务层**不再自己受理**（不 `gov.submit`），办理统一由 `/apply` 驱动
+`MainAgent` 完成，否则两条路径会产出质量不一致的办理单（见 `docs/09`）。
+
 用法：python tests/test_server_smoke.py
 """
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.materials.spec import material_specs
+from app.materials.store import MaterialStore
+from app.orchestrator.flow import STATUS_DONE
 from server.service import AgentService
+from server.stream import iter_events, load_scenario, material_gate
 
 RESTAURANT = {
     "name": "老张牛肉面",
@@ -29,8 +40,12 @@ ENTERPRISE = {
     "employees": 10,
 }
 
+# 造一张体积正常（核验通过）的图片
+JPG = b"\xff\xd8\xff\xe0" + b"\x00" * (20 * 1024 - 4)
 
-def run_scenario(svc, scenario_id, answers, message):
+
+def collect(svc, scenario_id, answers, message):
+    """建会话并逐字段采集，返回 (session_id, 最后一轮返回)。"""
     s = svc.create_session(scenario_id)
     t = svc.handle_message(s["session_id"], message)
     assert t["intent"] == "apply", t
@@ -40,40 +55,90 @@ def run_scenario(svc, scenario_id, answers, message):
         t = svc.submit_field(s["session_id"], q["key"], answers[q["key"]])
         guard += 1
         assert guard < 20, "字段采集出现死循环"
-    assert t.get("case"), t
     return s["session_id"], t
 
 
+def upload_all(svc, scenario, intake):
+    """按槽位把必交材料全部传齐。"""
+    for spec in material_specs(scenario, intake.materials):
+        for slot in (spec["slots"] or [""]):
+            svc.materials.upload(scenario, intake, spec["id"],
+                                 (slot or spec["id"]) + ".jpg", "image/jpeg", JPG, slot=slot)
+
+
 def main():
-    svc = AgentService(ROOT)
+    tmp = Path(tempfile.mkdtemp(prefix="yjs-service-"))
+    try:
+        svc = AgentService(ROOT, store=MaterialStore(
+            intakes_file=tmp / "intakes.json", materials_dir=tmp / "materials"))
 
-    # 咨询意图
-    s = svc.create_session("restaurant_open")
-    t = svc.handle_message(s["session_id"], "开餐饮店需要什么材料？")
-    assert t["intent"] == "consult", t
+        # 1) 咨询意图
+        s = svc.create_session("restaurant_open")
+        t = svc.handle_message(s["session_id"], "开餐饮店需要什么材料？")
+        assert t["intent"] == "consult", t
 
-    # 餐饮店多轮闭环（80㎡ + 招牌 -> 招牌审批，不触发消防）
-    sid, t = run_scenario(svc, "restaurant_open", RESTAURANT, "我想开一家牛肉面馆")
-    assert "D_signboard" in t["case"]["items"], t["case"]["items"]
-    assert "C_fire" not in t["case"]["items"], t["case"]["items"]
-    assert "油烟净化设施证明" in t["case"]["materials"], t["case"]["materials"]
+        # 2) 多轮采集：字段填完应产出材料清单，而**不是**直接受理
+        sid, t = collect(svc, "restaurant_open", RESTAURANT, "我想开一家牛肉面馆")
+        assert t["intake_id"].startswith("CL"), t
+        assert t.get("case") is None, "字段采齐后不该直接受理"
+        assert "D_signboard" in t["items"], t["items"]
+        assert "C_fire" not in t["items"], t["items"]
 
-    # 大面积 -> 触发消防
-    big = dict(RESTAURANT, area_sqm=500)
-    _, tb = run_scenario(svc, "restaurant_open", big, "我想开一家大烧烤店")
-    assert "C_fire" in tb["case"]["items"], tb["case"]["items"]
+        view = t["material_view"]
+        names = [m["name"] for m in view["materials"]]
+        assert "油烟净化设施证明" in names, names       # 热食 -> 条件加材料
+        assert view["summary"] == {"total": 4, "passed": 0, "ready": False}, view["summary"]
+        for material in view["materials"]:
+            assert material["reason"] and material["form"], material   # 必须告诉用户为什么、怎么给
 
-    # 企业多轮闭环（预约开户 + 10 人 -> 用工备案）
-    _, te = run_scenario(svc, "enterprise_open", ENTERPRISE, "我想注册一家科技公司")
-    assert "D_bank" in te["case"]["items"], te["case"]["items"]
-    assert "用工备案材料" in te["case"]["materials"], te["case"]["materials"]
+        # 3) 材料没交齐不允许受理
+        scenario = load_scenario("restaurant_open")
+        intake = svc.materials.store.get(t["intake_id"])
+        assert len(material_gate(scenario, intake)) == 4
 
-    # 进度查询
-    p = svc.handle_message(sid, "进度到哪了")
-    assert p["intent"] == "query", p
-    assert p["progress"], p
+        # 4) 传齐后放行
+        upload_all(svc, scenario, intake)
+        assert material_gate(scenario, intake) == []
 
-    print("SERVER SMOKE PASSED")
+        # 5) 跑编排；办理单应被挂回会话
+        events = list(iter_events(scenario, "我想开一家牛肉面馆", RESTAURANT, intake,
+                                  on_finish=lambda case: svc.attach_case(sid, case)))
+        types = [event.type for event in events]
+        assert types[0] == "flow_node" and types[-1] == "finished", types
+        assert "case_created" in types and "item_done" in types, types
+
+        rec = svc.sessions[sid]
+        assert rec.case is not None, "办理单应已挂回会话"
+        flow = {node["key"]: node for node in rec.case.flow}
+        assert flow["verify"]["status"] == STATUS_DONE, flow["verify"]
+        assert len(rec.case.flow) == 11, len(rec.case.flow)          # 7 框架节点 + 4 部门事项
+        assert set(rec.case.item_status.values()) == {"已办结"}, rec.case.item_status
+        assert rec.case.verify_report.get("passed") == 4, rec.case.verify_report
+        assert rec.case.materials == intake.materials, rec.case.materials
+
+        # 6) 会话内查进度
+        p = svc.handle_message(sid, "进度到哪了")
+        assert p["intent"] == "query", p
+        assert p["progress"], p
+        assert len(p["progress"]) == 4, p["progress"]
+
+        # 7) 再问办理 -> 应提示去交材料，而不是重复生成清单
+        again = svc.handle_message(sid, "开始办理")
+        assert again["intake_id"] == t["intake_id"], again
+
+        # 8) 企业场景（预约开户 + 10 人 -> 用工备案）
+        _, te = collect(svc, "enterprise_open", ENTERPRISE, "我想注册一家科技公司")
+        assert "D_bank" in te["items"], te["items"]
+        assert "labor_filing" in te["materials"], te["materials"]
+        assert len(te["material_view"]["materials"]) == 4, te["material_view"]["summary"]
+
+        # 9) 大面积 -> 触发消防（不触发时不该出现）
+        _, tb = collect(svc, "restaurant_open", dict(RESTAURANT, area_sqm=500), "我想开一家大烧烤店")
+        assert "C_fire" in tb["items"], tb["items"]
+
+        print("SERVER SMOKE PASSED")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
