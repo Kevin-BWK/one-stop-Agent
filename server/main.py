@@ -23,7 +23,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health():
-        return {"status": "ok"}
+        return {"status": "ok", "moma": service.moma.mode()}
 
     @app.post("/api/session")
     def create_session(req: SessionCreateRequest):

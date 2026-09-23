@@ -59,7 +59,9 @@ def main():
     client = TestClient(app)
 
     # 健康检查
-    assert client.get("/health").json() == {"status": "ok"}
+    health = client.get("/health").json()
+    assert health["status"] == "ok"
+    assert health["moma"] in ("live", "stub")
 
     # 咨询
     s = client.post("/api/session", json={"scenario_id": "restaurant_open"}).json()

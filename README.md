@@ -72,7 +72,7 @@ one-stop-agent/
 | 层级 | 当前骨架（零依赖） | 目标 / 生产形态 |
 | --- | --- | --- |
 | 语言 / 运行 | Python 3.10+ 标准库（dataclass） | Python + FastAPI + uvicorn |
-| 平台底座 | `MoMAClient` 桩 | 移动云 MoMA 多模型调度 / 路由 / 上下文 |
+| 平台底座 | `MoMAClient`（桩 / 真实可切换） | 移动云 MoMA 多模型调度 / 路由 / 上下文 |
 | 模型 | deepseek-r1 / qwen-turbo / qwen-vl / 规则引擎（桩） | 九天大模型 + DeepSeek / Qwen / GLM / Qwen-VL |
 | 知识检索 | 整篇 markdown 返回 | 向量库 + Embedding（BGE 等）RAG |
 | 上下文 / 数据 | `SessionContext` / `InMemoryRepo` 内存 | Redis + PostgreSQL / MySQL |
@@ -92,6 +92,7 @@ python run_demo.py --query YJS0001
 
 # 冒烟测试（无需 pytest）
 python tests/test_flow.py
+python tests/test_moma_client.py   # MoMA 客户端（离线）
 python tests/test_server_smoke.py   # 服务层多轮会话闭环（零第三方依赖）
 
 # 启动 API（需先 pip install -r requirements.txt）
@@ -106,7 +107,7 @@ uvicorn server.main:app --reload
 
 | 模块 | 当前实现 | 真实接入 |
 | --- | --- | --- |
-| `app/moma/client.py` | 返回模拟回复与模型名 | 调用 MoMA API（多模型调度 / 路由） |
+| `app/moma/client.py` | ✅ 已支持真实 API（未配置环境变量时回退桩） | 配置 `MOMA_API_BASE` / `MOMA_API_KEY` 即启用 |
 | `app/knowledge/retriever.py` | 整篇返回 markdown 指南 | 向量检索 / RAG |
 | `app/mock_gov/services.py` | 本地内存模拟并联办理 | 对接真实政务系统 |
 | `app/storage/repo.py` | 内存 / JSON 文件（跨进程查询进度） | PostgreSQL / MySQL |
@@ -144,6 +145,33 @@ uvicorn server.main:app --reload
 
 > 说明：**前端尚未实现**；其依赖的编排事件出口（`MainAgent.run / query` 的可选 `on_event` 回调，`Event.to_dict()` 可直接序列化为事件 JSON）已就绪，服务层推送即可（App: WebSocket；H5: SSE）。完整的工程结构、事件契约与接口定义见 `docs/07-前端交互设计.md`。
 
+## MoMA 真实接入
+
+`app/moma/client.py` 支持“桩 / 真实”一键切换，业务代码无需改动：
+
+- **未配置环境变量** → 桩模式：本地模拟回复，Demo 与单测可离线运行。
+- **配置环境变量** → 真实模式：调用 OpenAI 兼容接口 `POST {MOMA_API_BASE}/chat/completions`，5xx / 429 自动重试，失败时可用本地回退。
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `MOMA_API_BASE` | 服务地址，例如 `https://moma.example.com/v1` |
+| `MOMA_API_KEY` | 访问密钥（Bearer） |
+| `MOMA_TIMEOUT` | 超时秒数，默认 30 |
+| `MOMA_MAX_RETRIES` | 失败重试次数，默认 2 |
+| `MOMA_MODEL_STRONG` / `_LIGHT` / `_VISION` / `_RULE` | 按需覆盖模型池 |
+
+```powershell
+# Windows PowerShell：配置后即走真实 MoMA
+$env:MOMA_API_BASE = "https://moma.example.com/v1"
+$env:MOMA_API_KEY  = "<你的密钥>"
+python run_demo.py restaurant
+
+# 健康检查会返回当前模式（需先启动服务）
+curl.exe http://127.0.0.1:8000/health   # {"status":"ok","moma":"live"}
+```
+
+> 未拿到真实凭证时保持桩模式即可；配置后无需修改任何业务代码。
+
 ## 工作总结与分工
 
 ### 已完成工作
@@ -177,7 +205,7 @@ uvicorn server.main:app --reload
 - [x] 数据模型 / 存储 / 配置 / 演示入口
 - [x] README / 设计文档 / GitHub 发布
 - [x] FastAPI 服务层 + 多轮会话改造
-- [ ] MoMA 真实 API 接入
+- [x] MoMA 真实 API 接入
 - [ ] 前端（uni-app：App（成品） / H5（测试用），协作 · 以 Anjie 为主）
 
 #### Anjie（组员）· 场景与业务
@@ -197,6 +225,6 @@ uvicorn server.main:app --reload
 - [x] 双场景骨架 + 完整编排闭环 + 条件路由
 - [x] 进度状态推进（让“办理进度”可变化）
 - [ ] uni-app 前端（Vue 3 + TypeScript，App（成品） / H5（测试用）：聊天 + 动态表单 + 进度看板，事件推送，见「前端交互设计」）
-- [ ] MoMA 真实 API 接入
+- [x] MoMA 真实 API 接入
 - [ ] 向量化知识库与 RAG 检索
 - [ ] 多模态材料核验
