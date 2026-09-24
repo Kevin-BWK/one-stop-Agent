@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import {
   askQuestion,
   createIntake,
+  createSession,
   fetchCase,
   fetchPreview,
   fetchScenario,
@@ -72,6 +73,8 @@ export const useCaseStore = defineStore('case', {
     itemStatus: {} as Record<string, string>,
     itemOutput: {} as Record<string, string>,
     caseId: '',
+    /** 会话号：用户第一次提问时懒建，用于对话区的多轮上下文 */
+    sessionId: '',
     /** 材料收集单号：填完信息、拿到材料清单后才有 */
     intakeId: '',
     materials: [] as MaterialItem[],
@@ -143,6 +146,7 @@ export const useCaseStore = defineStore('case', {
 
     reset() {
       this.messages = []
+      this.sessionId = ''
       this.intakeId = ''
       this.materials = []
       this.materialSummary = { total: 0, passed: 0, ready: false }
@@ -405,6 +409,16 @@ export const useCaseStore = defineStore('case', {
       }
     },
 
+    /** 拿到会话号（没有就懒建一个）。会话是对话区"多轮上下文"的前提。 */
+    async ensureSession(): Promise<string> {
+      if (this.sessionId) {
+        return this.sessionId
+      }
+      const created = await createSession(this.scenarioId)
+      this.sessionId = created.session_id
+      return this.sessionId
+    },
+
     /** 对话区提问：任何时候都能问，答完不影响正在填的信息 */
     async ask(question: string) {
       const text = (question || '').trim()
@@ -414,7 +428,14 @@ export const useCaseStore = defineStore('case', {
       this.pushMessage('你', text)
       this.asking = true
       try {
-        const result = await askQuestion(this.scenarioId, text)
+        let sessionId = ''
+        try {
+          sessionId = await this.ensureSession()
+        } catch (e) {
+          // 建会话失败不该挡住提问：退回无状态问答（只是没有上下文）
+          sessionId = ''
+        }
+        const result = await askQuestion(this.scenarioId, text, sessionId)
         this.pushMessage('咨询Agent', result.answer)
       } catch (e: any) {
         this.error = e && e.message ? e.message : '咨询失败'

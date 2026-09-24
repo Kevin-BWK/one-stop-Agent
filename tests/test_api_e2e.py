@@ -137,6 +137,18 @@ def main():
     _, te = apply_and_submit(client, "enterprise_open", ENTERPRISE, "我想注册一家科技公司")
     assert "D_bank" in te["case"]["items"], te["case"]["items"]
 
+    # 对话区提问：带会话走多轮上下文，会话不存在返回 404
+    talk = client.post("/api/session", json={"scenario_id": "restaurant_open"}).json()
+    r = client.post("/api/ask", json={
+        "scenario_id": "restaurant_open", "question": "需要什么材料",
+        "session_id": talk["session_id"]})
+    assert r.status_code == 200 and r.json()["answer"], r.json()
+    r = client.post("/api/ask", json={
+        "scenario_id": "restaurant_open", "question": "hi", "session_id": "nope"})
+    assert r.status_code == 404, r.text
+    assert client.post("/api/ask", json={
+        "scenario_id": "restaurant_open", "question": "  "}).status_code == 400
+
     # 条件判定实时预判：只读、无状态，按当前输入给出事项与材料
     # （规则细节见 tests/test_condition_routing.py，这里只验接口契约）
     base = client.post("/api/preview", json={"scenario_id": "restaurant_open", "answers": {}}).json()

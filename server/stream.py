@@ -37,9 +37,13 @@ def load_scenario(scenario_id: str) -> Optional[Dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def answer_question(scenario: Dict[str, Any], question: str) -> str:
-    """咨询应答：复用咨询 Agent（接 MoMA 后即为真实对话模型，接口不变）。"""
-    agent = ConsultAgent(MoMAClient(), SessionContext())
+def answer_question(scenario: Dict[str, Any], question: str, context=None) -> str:
+    """咨询应答：复用咨询 Agent（接 MoMA 后即为真实对话模型，接口不变）。
+
+    传入 `context`（会话上下文）时会带上该会话的历史问答，即**多轮上下文**；
+    不传则用一次性上下文，等价于无状态的单轮问答。
+    """
+    agent = ConsultAgent(MoMAClient(), context if context is not None else SessionContext())
     return agent.answer(question, scenario)
 
 

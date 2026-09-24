@@ -64,6 +64,11 @@ def _run(scenario_id, answers):
     return case
 
 
+def _board_text(trace):
+    """从编排轨迹里取出结构化进度看板文本（CLI 展示用，不进对话区）。"""
+    return "\n".join(text for stage, text in trace if stage == "办理进度看板")
+
+
 # 条件判定的规则矩阵（每条规则、边界值、组合、反向、配置一致性）统一在
 # tests/test_condition_routing.py。本文件属编排层，只留"表单值真的流进了规则引擎、
 # 结果落到了办理单上"的集成冒烟（一正一反），不在这里重复规则细节。
@@ -106,17 +111,20 @@ def test_item_agents_report_completion():
     _, case = agent.run(RESTAURANT_ANSWERS["utterance"], RESTAURANT_ANSWERS)
     assert set(case.item_status.values()) == {MockGovServices.STAGES[-1]}  # 全部办结
     assert agent.gov.is_finished(case)
-    assert "【并联办理】" in agent.query(case.case_id)[0][-1][1]
+    assert "【并联办理】" in _board_text(agent.query(case.case_id)[0])
 
 
 def test_progress_query_by_case_id():
-    """查询意图 + 单号可返回既有办理单的进度看板。"""
+    """查询意图 + 单号可返回既有办理单的进度：结构化看板进 trace，对话区只收自然语言。"""
     agent, _ = _make_agent("enterprise_open")
     _, case = agent.run(ENTERPRISE_ANSWERS["utterance"], ENTERPRISE_ANSWERS)
     trace, found = agent.run("查询进度", {"case_id": case.case_id})
     assert found is not None
     assert found.case_id == case.case_id
-    assert "【办理流程】" in trace[-1][1]
+    assert "【办理流程】" in _board_text(trace)
+    # 推给对话区的那条不能是看板文本（见 docs/08 文案规范）
+    assert "【办理流程】" not in trace[-1][1]
+    assert "办理单 " + case.case_id in trace[-1][1]
 
 
 def test_events_emitted_for_gui():

@@ -147,6 +147,50 @@ def test_consult_agent_wiring():
     assert sent[0]["role"] == "system" and "开办餐饮店" in sent[0]["content"]
 
 
+def test_consult_agent_multi_turn_context():
+    """多轮上下文：本会话之前的问答要进入发给模型的消息（见 docs/08）。"""
+    context = SessionContext()
+    context.add_history("user", "开餐饮店要交什么材料")
+    context.add_history("assistant", "要交身份证、经营场所证明。")
+
+    session = FakeSession([ok("第二个问题的回答")])
+    agent = ConsultAgent(
+        MoMAClient(api_base="https://x/v1", api_key="k", session=session, sleep=no_sleep),
+        context,
+    )
+    assert agent.answer("那第二个呢", SCENARIO) == "第二个问题的回答"
+
+    sent = session.calls[0]["json"]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"], sent
+    assert sent[1]["content"] == "开餐饮店要交什么材料", sent
+    assert sent[-1]["content"] == "那第二个呢", sent        # 当前问题在最后，且不重复
+    # 本轮问答也要记进历史，供下一轮使用
+    assert context.history()[-2:] == [
+        {"role": "user", "content": "那第二个呢"},
+        {"role": "assistant", "content": "第二个问题的回答"},
+    ], context.history()
+
+
+def test_consult_agent_history_is_capped():
+    """历史过长时只带最近若干条，避免请求无限膨胀、模型被早期内容带偏。"""
+    context = SessionContext()
+    for index in range(20):
+        context.add_history("user", "问题" + str(index))
+        context.add_history("assistant", "回答" + str(index))
+
+    session = FakeSession([ok("ok")])
+    agent = ConsultAgent(
+        MoMAClient(api_base="https://x/v1", api_key="k", session=session, sleep=no_sleep),
+        context,
+    )
+    agent.answer("最后的问题", SCENARIO)
+
+    sent = session.calls[0]["json"]["messages"]
+    assert len(sent) == 1 + ConsultAgent.MAX_HISTORY + 1, len(sent)
+    assert sent[0]["role"] == "system"
+    assert sent[-1]["content"] == "最后的问题"
+
+
 def main():
     test_stub_mode()
     test_live_mode_parse_openai()
@@ -156,6 +200,8 @@ def main():
     test_bad_json_raises()
     test_model_env_override()
     test_consult_agent_wiring()
+    test_consult_agent_multi_turn_context()
+    test_consult_agent_history_is_capped()
     print("MOMA TESTS PASSED")
 
 

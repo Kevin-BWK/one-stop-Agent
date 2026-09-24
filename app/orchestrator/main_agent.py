@@ -284,5 +284,7 @@ class MainAgent:
         if case is None:
             self._log(trace, on_event, "进度Agent", "未找到办理单 " + str(case_id) + "，请核对单号。")
             return trace, None
-        self._log(trace, on_event, "进度Agent", "当前进度：\n" + self._board(case))
+        # 结构化看板只给 CLI / 进度看板；推给对话区的必须是自然语言（见 docs/08 文案规范）
+        trace.append(("办理进度看板", self._board(case)))
+        self._log(trace, on_event, "进度Agent", self._describe_progress(case))
         return trace, case

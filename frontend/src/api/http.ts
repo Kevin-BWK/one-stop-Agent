@@ -58,15 +58,45 @@ export interface AskResult {
   answer: string
 }
 
-/** 对话区提问（咨询意图），返回自然语言回答 */
-export async function askQuestion(scenarioId: string, question: string): Promise<AskResult> {
-  const res = await fetch('/api/ask', {
+/** 会话信息（`POST /api/session` 的返回，界面只用到 session_id） */
+export interface SessionInfo {
+  session_id: string
+  scenario_id: string
+  scenario_name: string
+  message: string
+}
+
+/**
+ * 建会话。
+ *
+ * 对话区走会话之后才有**多轮上下文**——服务端按 session 记住前几轮问答
+ * （见 `docs/08`）。表单式办理本身不依赖会话，所以只在用户第一次提问时懒建。
+ */
+export async function createSession(scenarioId: string): Promise<SessionInfo> {
+  const res = await fetch(API_BASE + '/api/session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ scenario_id: scenarioId, question })
+    body: JSON.stringify({ scenario_id: scenarioId })
   })
   if (!res.ok) {
-    throw new Error('咨询失败（' + res.status + '）')
+    throw new Error(await errorText(res, '会话创建失败'))
+  }
+  return (await res.json()) as SessionInfo
+}
+
+/** 对话区提问（咨询意图），返回自然语言回答；带 sessionId 才有上下文 */
+export async function askQuestion(
+  scenarioId: string,
+  question: string,
+  sessionId = ''
+): Promise<AskResult> {
+  const res = await fetch(API_BASE + '/api/ask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scenario_id: scenarioId, question, session_id: sessionId })
+  })
+  if (!res.ok) {
+    throw new Error(await errorText(res, '咨询失败'))
   }
   return (await res.json()) as AskResult
 }

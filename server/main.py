@@ -115,14 +115,24 @@ def create_app() -> FastAPI:
 
     @app.post("/api/ask")
     def ask(req: AskRequest):
-        """对话区提问：返回自然语言回答（咨询意图）。"""
+        """对话区提问：返回自然语言回答（咨询意图）。
+
+        带 `session_id` 时复用该会话的上下文 → **多轮上下文**（见 `docs/08`），
+        用户才能问"那第二个呢"这种省略句；不带时等价于无状态单轮问答。
+        """
         scenario = load_scenario(req.scenario_id)
         if scenario is None:
             raise HTTPException(status_code=404, detail="场景不存在")
         question = (req.question or "").strip()
         if not question:
             raise HTTPException(status_code=400, detail="问题不能为空")
-        return {"question": question, "answer": answer_question(scenario, question)}
+        context = None
+        if req.session_id:
+            try:
+                context = service.context_of(req.session_id)
+            except KeyError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+        return {"question": question, "answer": answer_question(scenario, question, context)}
 
     @app.get("/apply")
     def apply_stream(scenario_id: str, utterance: str = "", answers: str = "{}",

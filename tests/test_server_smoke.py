@@ -134,7 +134,16 @@ def main():
         again = svc.handle_message(sid, "开始办理")
         assert again["intake_id"] == t["intake_id"], again
 
-        # 8) 企业场景也走一遍（证明换场景、换答案都能跑通）
+        # 8) 多轮上下文：咨询问答要记进会话历史（下次提问才会带上）
+        history_before = len(svc.context_of(sid).history())
+        t = svc.handle_message(sid, "需要什么材料？")
+        assert t["intent"] == "consult", t
+        history = svc.context_of(sid).history()
+        assert len(history) == history_before + 2, history          # 一问一答
+        assert history[-2]["role"] == "user", history
+        assert history[-1]["role"] == "assistant", history
+
+        # 9) 企业场景也走一遍（证明换场景、换答案都能跑通）
         _, te = collect(svc, "enterprise_open", ENTERPRISE, "我想注册一家科技公司")
         assert "D_bank" in te["items"], te["items"]
         assert len(te["material_view"]["materials"]) == 4, te["material_view"]["summary"]

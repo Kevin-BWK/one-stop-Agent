@@ -20,6 +20,10 @@ APPLY_WORDS = ("我想", "我要", "想开", "想办", "注册", "申请", "开�
 class ConsultAgent(BaseAgent):
     name = "consult"
 
+    # 带进对话上下文的最大历史条数（约 3 轮问答）。
+    # 不设上限会让长会话把请求撑爆，也会让模型被早期无关内容带偏。
+    MAX_HISTORY = 6
+
     def answer(self, question, scenario):
         model = self.model_for()
         reply = self.moma.complete(
@@ -51,10 +55,13 @@ class ConsultAgent(BaseAgent):
             "办理事项：" + self._item_text(scenario) + "。"
             "基础材料：" + (materials or "以办事指南为准") + "。"
         )
-        return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ]
+        messages = [{"role": "system", "content": system}]
+        # 多轮上下文：带上本会话之前的问答，用户才能说"那第二个呢"这种省略句。
+        # 当前问题此时还没写进 history（answer() 在拿到回复后才记），所以不会重复。
+        history = self.context.history() if self.context is not None else []
+        messages += history[-self.MAX_HISTORY:]
+        messages.append({"role": "user", "content": question or ""})
+        return messages
 
     # ---------- 本地兜底：离线或模型失败时，按问题给固定人话 ----------
 

@@ -121,6 +121,14 @@ class AgentService:
         case = self.repo.get_case(case_id)
         return self._case_dict(case) if case else None
 
+    def context_of(self, session_id: str) -> SessionContext:
+        """取某个会话的上下文。
+
+        咨询等需要"记住前几轮说了什么"的场景复用它；这也是对话区
+        （`/api/ask` 带 `session_id`）能获得多轮上下文的入口。
+        """
+        return self._get(session_id).context
+
     def attach_case(self, session_id: str, case: Optional[CaseRecord]) -> None:
         """把 `/apply` 生成的办理单挂回会话。
 
