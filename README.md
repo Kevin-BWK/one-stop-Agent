@@ -96,12 +96,13 @@ python run_demo.py enterprise     # 只跑企业
 # 按办理单号查询办理进度看板
 python run_demo.py --query YJS0001
 
-# 冒烟测试（无需 pytest）
-python tests/test_flow.py
-python tests/test_materials.py      # 材料提交链路：清单 / 槽位 / 核验 / 补正 / 撤回 / 受理拦截
-python tests/test_moma_client.py    # MoMA 客户端：桩/真实、重试与降级（离线）
-python tests/test_api_e2e.py        # 端到端 HTTP：多轮会话 + 材料提交 + 异常分支
-python tests/test_server_smoke.py   # 服务层多轮会话闭环（零第三方依赖）
+# 冒烟测试（无需 pytest），按层组织
+python tests/test_condition_routing.py  # 规则层：条件判定矩阵（操作符 / 边界 / 组合 / 反向）
+python tests/test_flow.py               # 编排层：MainAgent 闭环 + 流程节点 + 事件
+python tests/test_materials.py          # 材料层：清单 / 槽位 / 核验 / 补正 / 撤回 / 受理拦截
+python tests/test_moma_client.py        # 模型层：MoMA 桩/真实、重试与降级（离线）
+python tests/test_server_smoke.py       # 服务层：多轮会话闭环（零第三方依赖）
+python tests/test_api_e2e.py            # 接口层：端到端 HTTP + 异常分支
 
 # 启动 API（需先 pip install -r requirements.txt）
 uvicorn server.main:app --reload

@@ -64,25 +64,24 @@ def _run(scenario_id, answers):
     return case
 
 
+# 条件判定的规则矩阵（每条规则、边界值、组合、反向、配置一致性）统一在
+# tests/test_condition_routing.py。本文件属编排层，只留"表单值真的流进了规则引擎、
+# 结果落到了办理单上"的集成冒烟（一正一反），不在这里重复规则细节。
+
+
 def test_restaurant_flow():
     case = _run("restaurant_open", RESTAURANT_ANSWERS)
     assert case.case_id.startswith("YJS")
-    assert "A_license" in case.items
-    assert "D_signboard" in case.items  # 设置了招牌 -> 触发城管
-    assert "C_fire" not in case.items  # 80 平米 -> 不触发消防
-
-
-def test_restaurant_condition_routing():
-    big = dict(RESTAURANT_ANSWERS, area_sqm=500)
-    case = _run("restaurant_open", big)
-    assert "C_fire" in case.items  # 大面积 -> 触发消防检查
+    assert "A_license" in case.items      # 基础事项
+    assert "D_signboard" in case.items    # 正向：设了招牌 -> 多出城管审批
+    assert "C_fire" not in case.items     # 反向：80 平米 -> 不触发消防
 
 
 def test_enterprise_flow():
     case = _run("enterprise_open", ENTERPRISE_ANSWERS)
     assert case.case_id.startswith("YJS")
-    assert "D_bank" in case.items  # 预约开户
-    assert "labor_filing" in case.materials  # 10 人 -> 用工备案
+    assert "E_seal" in case.items         # 基础事项
+    assert "D_bank" in case.items         # 正向：勾了同步预约银行开户
 
 
 def test_flow_nodes_all_checked():
@@ -166,7 +165,6 @@ def test_run_without_on_event_unchanged():
 
 if __name__ == "__main__":
     test_restaurant_flow()
-    test_restaurant_condition_routing()
     test_enterprise_flow()
     test_flow_nodes_all_checked()
     test_item_agents_report_completion()
