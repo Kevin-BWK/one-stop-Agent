@@ -78,6 +78,22 @@ function pagesOf(material: MaterialItem): (MaterialFile & { isImage: boolean })[
   return material.files.map((file) => ({ ...file, isImage: isImageName(file.filename) }))
 }
 
+/**
+ * 需补正的文件：说明要完整展示"哪里不对、怎么改"。
+ *
+ * 后端给的是两句话（问题 + 动作），塞进 84×84 的缩略图里根本显示不出来，
+ * 所以在材料条目下单独成块。
+ */
+function fixNotes(material: MaterialItem): MaterialFile[] {
+  return material.files.filter((file) => file.status === '需补正')
+}
+
+/** 这张材料"上一次上传被拒"的原因（格式 / 体积这类文件没进来的问题） */
+function noticeOf(material: MaterialItem): string {
+  const notice = store.materialNotice
+  return notice && notice.materialId === material.id ? notice.text : ''
+}
+
 /** 空槽位点一下：能拍照就优先调相机，否则走文件选择 */
 function onPick(material: MaterialItem, slot: string) {
   if (acceptImage(material)) {
@@ -143,7 +159,6 @@ function sizeText(size: number): string {
             <view v-else-if="cell.state === 'fix'" class="slot__box slot__box--fix">
               <image v-if="cell.isImage" class="slot__thumb" :src="cell.url" mode="aspectFill" />
               <view v-else class="slot__doc"><text>PDF</text></view>
-              <text class="slot__why">{{ cell.reason }}</text>
               <view class="slot__acts">
                 <text class="slot__act slot__act--fix" @click="onPick(material, cell.slot)">重传</text>
                 <text class="slot__act" @click="store.removeMaterial(material.id, cell.fileId)">
@@ -188,6 +203,19 @@ function sizeText(size: number): string {
             <text class="slot__plus">＋</text>
             <text class="page__hint">{{ material.files.length }}/{{ material.max_files }}</text>
           </view>
+        </view>
+
+        <!-- 上一次上传被拒的原因：格式 / 体积这类"文件没进来"的问题 -->
+        <view v-if="noticeOf(material)" class="note note--warn">
+          <text class="note__body">{{ noticeOf(material) }}</text>
+        </view>
+
+        <!-- 需补正说明：后端给的是一段"哪里不对 + 怎么改"，完整展示 -->
+        <view v-for="file in fixNotes(material)" :key="file.file_id" class="note note--fix">
+          <text class="note__head">
+            {{ file.slot ? '「' + file.slot + '」需要重传' : '这一张需要重传' }}
+          </text>
+          <text class="note__body">{{ file.reason }}</text>
         </view>
 
         <text v-if="material.missing_slots.length" class="mat__miss">
@@ -394,16 +422,39 @@ function sizeText(size: number): string {
   padding: 0 4px;
 }
 
-.slot__why {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  padding: 2px 4px;
-  font-size: 10px;
-  line-height: 13px;
-  color: #ffffff;
-  background: rgba(185, 28, 28, 0.82);
+/* 需补正 / 被拒的说明：整段可读，不再压在缩略图上 */
+.note {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-left: 3px solid #f3b4b4;
+  border-radius: 8px;
+  background: #fff7f7;
+}
+
+.note--warn {
+  border-left-color: #f0c674;
+  background: #fffbf0;
+}
+
+.note__head {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #b91c1c;
+}
+
+.note__body {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 19px;
+  color: #b91c1c;
+  word-break: break-word;
+}
+
+.note--warn .note__body {
+  margin-top: 0;
+  color: #92400e;
 }
 
 .slot__act,

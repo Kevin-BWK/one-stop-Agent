@@ -81,6 +81,13 @@ export const useCaseStore = defineStore('case', {
     materialSummary: { total: 0, passed: 0, ready: false } as MaterialSummary,
     /** 正在上传/撤回的那一项（`materialId|slot`），用于禁用按钮 */
     materialBusy: '',
+    /**
+     * 上一次上传被拒的说明（格式 / 体积这类文件没进来的问题）。
+     *
+     * 带 `materialId` 是为了挂在对应材料条目下——全局浮层离用户刚点的槽位太远，
+     * 对不上"我传的是哪份"。
+     */
+    materialNotice: null as null | { materialId: string; text: string },
     /** 条件判定实时预判（见 /api/preview）：按目前填了多少预估事项与材料 */
     preview: null as ConditionPreview | null,
     previewTimer: null as null | ReturnType<typeof setTimeout>,
@@ -151,6 +158,7 @@ export const useCaseStore = defineStore('case', {
       this.materials = []
       this.materialSummary = { total: 0, passed: 0, ready: false }
       this.materialBusy = ''
+      this.materialNotice = null
       this.preview = null
       if (this.previewTimer) {
         clearTimeout(this.previewTimer)
@@ -262,6 +270,8 @@ export const useCaseStore = defineStore('case', {
       this.intakeId = view.intake_id
       this.materials = view.materials
       this.materialSummary = view.summary
+      // 拿到了新的材料区状态，说明上一次的拒收问题已经翻篇
+      this.materialNotice = null
     },
 
     /** 拍照 / 从相册选一张：App 端能直接调摄像头，桌面浏览器会退化为选文件 */
@@ -304,7 +314,9 @@ export const useCaseStore = defineStore('case', {
       try {
         this.applyMaterialView(await uploadMaterialFile(this.intakeId, materialId, filePath, slot))
       } catch (e: any) {
-        this.error = e && e.message ? e.message : '上传失败'
+        const text = e && e.message ? e.message : '上传失败'
+        this.error = text
+        this.materialNotice = { materialId, text }
       } finally {
         this.materialBusy = ''
       }
@@ -454,6 +466,7 @@ export const useCaseStore = defineStore('case', {
         this.intakeId = ''
         this.materials = []
         this.materialSummary = { total: 0, passed: 0, ready: false }
+        this.materialNotice = null
         this.preview = null
         if (Array.isArray(found.flow)) {
           this.nodes = found.flow

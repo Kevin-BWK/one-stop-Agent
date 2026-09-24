@@ -300,9 +300,14 @@ onMounted(() => {
   left: 50%;
   bottom: 24px;
   transform: translateX(-50%);
-  max-width: 80%;
+  /* 提示是整句话（说清"哪里不对 + 怎么改"），要能舒服地读多行 */
+  max-width: min(80%, 460px);
+  box-sizing: border-box;
   padding: 10px 16px;
   font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  word-break: break-word;
   color: #ffffff;
   background: #ef4444;
   border-radius: 10px;

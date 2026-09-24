@@ -143,18 +143,54 @@ def test_upload_rejects_bad_format_and_tiny_image():
         service.upload(scenario, intake, "premises", "合同.txt", "text/plain", b"hello", slot="场所证明")
         raise AssertionError("不支持的格式本应被拒绝")
     except ValueError as exc:
-        assert "格式收不了" in str(exc)
+        text = str(exc)
+        assert ".txt" in text, text          # 说清"你传的是什么"
+        assert "jpg" in text, text           # 说清"只收什么"
+        assert "转成" in text, text          # 说清"怎么改"
 
     try:
         service.upload(scenario, intake, "premises", "空.jpg", "image/jpeg", b"", slot="场所证明")
         raise AssertionError("空文件本应被拒绝")
     except ValueError as exc:
-        assert "是空的" in str(exc)
+        assert "0 字节" in str(exc), str(exc)
 
     view = service.upload(scenario, intake, "premises", "小图.jpg", "image/jpeg", _tiny_jpg(), slot="场所证明")
     premises = next(item for item in view["materials"] if item["id"] == "premises")
     assert premises["status"] == NEED_FIX
-    assert "重拍" in premises["files"][0]["reason"]
+    assert "516B" in premises["files"][0]["reason"]      # 说清"这张图到底多大"
+
+
+def test_errors_tell_the_user_how_to_fix():
+    """每条"不能收 / 要重传"的说明都要回答三件事：什么问题、为什么、怎么改。
+
+    这是产品要求不是文案偏好——办事人看完提示要能直接动手，
+    所以断言"说清了没有"，而不是断言某句具体措辞（措辞会改）。
+    """
+    from app.materials.verify import (DEFAULT_MAX_FILE_BYTES, StubChecker,
+                                      form_check, human_size)
+
+    spec = {"id": "premises", "name": "经营场所证明", "accept": ["jpg", "pdf"],
+            "fix_hint": "拍产权证的地址页与盖章页，整页进画面。"}
+
+    # 体积超限：实际大小 + 上限 + 具体怎么压
+    oversized = b"\x00" * (DEFAULT_MAX_FILE_BYTES + 1024)
+    text = form_check(spec, "big.jpg", oversized)["reason"]
+    assert human_size(len(oversized)) in text, text       # 你这个多大
+    assert human_size(DEFAULT_MAX_FILE_BYTES) in text, text   # 上限多少
+    assert "压缩" in text and "分辨率" in text, text        # 怎么改
+
+    # 格式不对：你传的是什么、只收什么、怎么转
+    text = form_check(spec, "scan.tiff", b"x" * 100)["reason"]
+    assert ".tiff" in text and "jpg" in text and "另存为" in text, text
+
+    # 内容核验：过小的图要有具体体积，且用上场景配置的"怎么改"
+    text = StubChecker().check(spec, "small.jpg", b"\x00" * 516)["reason"]
+    assert "516B" in text, text
+    assert "地址页" in text, text        # fix_hint 被采用了
+
+    # 场景没配 fix_hint 时也要有兜底动作
+    text = StubChecker().check({"id": "x", "name": "其他材料"}, "s.jpg", b"\x00" * 516)["reason"]
+    assert "重新拍" in text and "四角" in text, text
 
 
 def test_need_fix_file_can_be_replaced_in_place():
@@ -316,16 +352,30 @@ def test_parse_verdict_tolerates_model_noise():
     """模型常把 JSON 包在代码块或解释文字里；解析不出来就返回 None（调用方据此回落）。"""
     from app.materials.verify import parse_verdict
 
-    assert parse_verdict('{"ok": true, "reason": "清晰完整"}') == {"ok": True, "reason": "清晰完整"}
-    assert parse_verdict('```json\n{"ok": false, "reason": "看不清"}\n```') == {
-        "ok": False, "reason": "看不清"}
+    assert parse_verdict('{"ok": true, "problem": "", "fix": ""}') == {
+        "ok": True, "problem": "", "fix": ""}
+    assert parse_verdict('```json\n{"ok": false, "problem": "看不清", "fix": "重拍"}\n```') == {
+        "ok": False, "problem": "看不清", "fix": "重拍"}
     assert parse_verdict('判断结果：{"ok": true} 以上。')["ok"] is True
     assert parse_verdict('{"ok": "true"}')["ok"] is True      # 布尔被写成字符串
     assert parse_verdict('{"ok": false}')["ok"] is False
-    assert parse_verdict('{"ok": true}')["reason"] == ""
+    # 老契约只回 reason：当作 problem 用，不至于白白丢掉模型给的说明
+    assert parse_verdict('{"ok": false, "reason": "太暗了"}')["problem"] == "太暗了"
 
     for broken in ("", None, "没有 JSON", '{"reason": "缺 ok 字段"}', "{不是合法 JSON}", "[1, 2]"):
         assert parse_verdict(broken) is None, broken
+
+
+def test_clean_text_keeps_it_showable_and_safe():
+    """模型的话要能直接给群众看：压平换行、限长、屏蔽长数字串（证件号不落盘）。"""
+    from app.materials.verify import clean_text
+
+    assert clean_text("画面里\n有一只猫  ") == "画面里 有一只猫"
+    assert clean_text("证件号 110101199003071234 看不清") == "证件号 …… 看不清"
+    assert clean_text("看不清第 5 位") == "看不清第 5 位"     # 短数字不动
+    assert clean_text("结尾有句号。") == "结尾有句号"
+    assert clean_text("") == "" and clean_text(None) == ""
+    assert len(clean_text("模" * 300)) == 121                # 限长（120 字 + 省略号）
 
 
 def test_vision_checker_passes_clean_photo():
@@ -358,15 +408,27 @@ def test_vision_messages_carry_text_and_image():
 
 
 def test_vision_checker_flags_wrong_document():
-    """模型判"不是这份材料" -> 需补正（不是拒收），原因是人话且转达模型给的理由。"""
-    checker, _ = _vision([_vision_reply('{"ok": false, "reason": "这是一张猫的照片"}')])
+    """模型判"不是这份材料" -> 需补正（不是拒收），问题与动作都要转达成人话。"""
+    checker, _ = _vision([_vision_reply(
+        '{"ok": false, "problem": "画面里是一只猫", "fix": "把身份证正面平放，四角进画面再拍"}')])
     verdict = checker.check(_id_card_spec(), "front.jpg", _jpg(), slot="正面")
 
+    text = verdict["reason"]
     assert verdict["result"] == "需补正" and verdict["status"] == "需补正", verdict
-    assert "法定代表人身份证" in verdict["reason"], verdict
-    assert "正面" in verdict["reason"], verdict
-    assert "猫" in verdict["reason"], verdict            # 模型的理由要转达给用户
-    assert "qwen" not in verdict["reason"].lower(), verdict   # 但不暴露模型名（docs/08）
+    assert "法定代表人身份证" in text and "正面" in text, text
+    assert "一只猫" in text, text                     # 模型说的问题原样转达（比"看不清"具体）
+    assert "四角进画面" in text, text                  # 模型给的动作可以直接照做
+    assert "qwen" not in text.lower(), text           # 但不暴露模型名（docs/08 文案规范）
+
+    # 老契约（只回 reason）也要认
+    checker, _ = _vision([_vision_reply('{"ok": false, "reason": "太模糊"}')])
+    assert "太模糊" in checker.check(_id_card_spec(), "f.jpg", _jpg(), slot="正面")["reason"]
+
+    # 模型没说怎么改时，用场景配置的 fix_hint（{slot} 会被替换成具体槽位）
+    spec = dict(_id_card_spec(), fix_hint="把身份证「{slot}」平放再拍。")
+    checker, _ = _vision([_vision_reply('{"ok": false, "problem": "太暗"}')])
+    text = checker.check(spec, "f.jpg", _jpg(), slot="正面")["reason"]
+    assert "太暗" in text and "把身份证「正面」平放再拍。" in text, text
 
 
 def test_vision_checker_skips_non_image_and_huge_file():
@@ -481,6 +543,7 @@ if __name__ == "__main__":
     test_plan_follows_condition_rules()
     test_upload_enforces_slots_and_count()
     test_upload_rejects_bad_format_and_tiny_image()
+    test_errors_tell_the_user_how_to_fix()
     test_need_fix_file_can_be_replaced_in_place()
     test_multiple_pages_material_takes_1_to_max()
     test_remove_file_rolls_back_status()
@@ -489,6 +552,7 @@ if __name__ == "__main__":
     test_resume_from_materials_produces_case()
     test_resume_rejects_incomplete_materials()
     test_parse_verdict_tolerates_model_noise()
+    test_clean_text_keeps_it_showable_and_safe()
     test_vision_checker_passes_clean_photo()
     test_vision_messages_carry_text_and_image()
     test_vision_checker_flags_wrong_document()

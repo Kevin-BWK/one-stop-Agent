@@ -20,6 +20,18 @@
 - `通过`   —— 收下，该槽位占位；
 - `需补正` —— 收下但标记需补正，用户可原地重传（**"内容不对/看不清"属于这一类**）；
 - `不通过` —— 文件根本收不下（格式 / 体积），前端要重选。
+
+## 文案规范（每条"不能收 / 要重传"的说明都必须回答三件事）
+
+办事人看到提示后要能**直接动手**，所以每条说明都写成"问题 + 怎么改"：
+
+1. **是什么问题**——具体到能自证（"这个文件 18.4MB"、"这张图只有 3KB"、"画面里是一只猫"）；
+2. **为什么不行**——对照的规矩（"超过单张 10MB 上限"、"不像身份证正面"）；
+3. **怎么改**——可执行的动作（"压缩后再传"、"平放拍，四角进画面，别开闪光灯"）。
+
+"怎么改"的来源，按优先级：模型给的 `fix` > 场景配置的 `fix_hint` > 通用兜底。
+形式校验**不走模型**：格式/体积是硬规则，与内容无关，而且格式不对根本解不出图，
+没必要花一次模型调用去说"你的文件太大了"——本地把判据说具体就够。
 """
 import base64
 import json
@@ -42,6 +54,7 @@ VISION_MAX_BYTES = 2 * 1024 * 1024
 
 _MIME = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
+_LONG_DIGITS = re.compile(r"\d{8,}")
 _TRUE_WORDS = ("true", "yes", "ok", "1", "是", "通过", "合规", "符合")
 
 
@@ -57,16 +70,71 @@ def _reject(reason: str) -> Dict[str, str]:
     return {"result": RESULT_REJECT, "status": "", "reason": reason}
 
 
+def human_size(num: int) -> str:
+    """字节数说成人话：18432000 -> `17.6MB`，820 -> `820B`。"""
+    if num >= 1024 * 1024:
+        text = "%.1f" % (num / 1048576.0)
+        return (text[:-2] if text.endswith(".0") else text) + "MB"
+    if num >= 1024:
+        return str(int(round(num / 1024.0))) + "KB"
+    return str(int(num)) + "B"
+
+
+def material_label(spec: Dict[str, Any], slot: str = "") -> str:
+    """给用户看的指代：「法定代表人身份证」的「正面」。"""
+    label = "「" + str(spec.get("name", "")) + "」"
+    return label + "的「" + slot + "」" if slot else label
+
+
+def default_fix(spec: Dict[str, Any], slot: str = "") -> str:
+    """"怎么改"的兜底说法。
+
+    场景条目可以用 `fix_hint` 写得更贴切（如"拍产权证的地址页与盖章页"），
+    里面出现 `{slot}` 会被替换成具体槽位，例如"把身份证「{slot}」平放再拍"。
+    """
+    hint = str(spec.get("fix_hint") or "").strip()
+    if hint:
+        return hint.replace("{slot}", slot or "")
+    return "请重新拍一张" + material_label(spec, slot) + "：四角都进画面，光线充足，不要反光或遮挡。"
+
+
+def clean_text(text: Any, limit: int = 120) -> str:
+    """把模型给的一句话收拾成能直接给用户看的样子。
+
+    - 压平换行与多余空白（前端按一段话展示，换行会撑乱布局）；
+    - 屏蔽 8 位以上连续数字：证件号 / 卡号不该被写进落盘的材料记录；
+    - 限长，避免模型长篇大论把提示撑爆。
+    """
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    text = _LONG_DIGITS.sub("……", text)
+    text = text.strip(" 。,，；;")
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
+
 def form_check(spec: Dict[str, Any], filename: str, content: bytes) -> Optional[Dict[str, str]]:
-    """形式校验：合格返回 `None`，不合格返回拒绝结果。"""
+    """形式校验：合格返回 `None`，不合格返回拒绝结果（说清"多大/什么格式 + 怎么改"）。"""
     accept = [item.lower() for item in (spec.get("accept") or DEFAULT_ACCEPT)]
     ext = ext_of(filename)
+
     if ext not in accept:
-        return _reject("这个格式收不了，请上传 " + "/".join(accept) + "。")
+        got = ("." + ext) if ext else "没有扩展名"
+        return _reject(
+            "你选的文件是 " + got + " 格式，这里只收 " + "、".join(accept) + "。"
+            + "请用「另存为 / 导出」转成 " + accept[0] + " 后再传。"
+        )
     if not content:
-        return _reject("这个文件是空的，请重新选择。")
+        return _reject(
+            "这个文件是空的（0 字节），多半是没选对文件或上传中断了。"
+            "请重新选择，或者直接重新拍一张。"
+        )
     if len(content) > DEFAULT_MAX_FILE_BYTES:
-        return _reject("单个文件不能超过 10MB，请压缩后再传。")
+        return _reject(
+            "这个文件 " + human_size(len(content)) + "，超过了单张 "
+            + human_size(DEFAULT_MAX_FILE_BYTES) + " 的上限。"
+            + "请压缩后再传：手机上拍照可以选小一档的分辨率，或先用相册「裁剪」去掉多余部分。"
+        )
     return None
 
 
@@ -76,7 +144,10 @@ class StubChecker:
     def check(self, spec: Dict[str, Any], filename: str, content: bytes,
               slot: str = "") -> Dict[str, str]:
         if ext_of(filename) in IMAGE_EXTS and len(content) < MIN_IMAGE_BYTES:
-            return _need_fix("这张图太小、看不清内容，请重拍原图。")
+            return _need_fix(
+                "这张图只有 " + human_size(len(content)) + "，太小了看不清内容"
+                "（多半是缩略图或截图，不是原图）。" + default_fix(spec, slot)
+            )
         return _passed()
 
 
@@ -87,10 +158,11 @@ def data_url(ext: str, content: bytes) -> str:
 
 
 def parse_verdict(reply: Any) -> Optional[Dict[str, Any]]:
-    """从模型回复里取出 `{ok, reason}`；取不到返回 `None`（调用方据此回落桩规则）。
+    """从模型回复里取出 `{ok, problem, fix}`；取不到返回 `None`（调用方据此回落桩规则）。
 
     模型常把 JSON 包在 ```json 代码块里、或前后带些解释文字，所以先用正则抓第一个
     对象再严格解析——**宁可回落桩规则，也不要把半截结果当结论**。
+    早期契约只回 `reason`，这里也认，当作 `problem` 用。
     """
     match = _JSON_BLOCK.search(str(reply or ""))
     if not match:
@@ -104,7 +176,11 @@ def parse_verdict(reply: Any) -> Optional[Dict[str, Any]]:
     ok = data.get("ok")
     if isinstance(ok, str):
         ok = ok.strip().lower() in _TRUE_WORDS
-    return {"ok": bool(ok), "reason": str(data.get("reason") or "").strip()}
+    return {
+        "ok": bool(ok),
+        "problem": clean_text(data.get("problem") or data.get("reason")),
+        "fix": clean_text(data.get("fix")),
+    }
 
 
 class VisionChecker:
@@ -142,19 +218,22 @@ class VisionChecker:
             return self.fallback.check(spec, filename, content, slot)
         if verdict["ok"]:
             return _passed()
-        return _need_fix(self.describe_rejection(spec, slot, verdict["reason"]))
+        return _need_fix(self.describe_rejection(spec, slot, verdict))
 
     @staticmethod
     def messages(spec: Dict[str, Any], slot: str, ext: str, content: bytes) -> List[Dict[str, Any]]:
         """构造多模态消息（OpenAI 兼容：`content` 为数组，含文本与图片 data URL）。"""
-        label = "「" + str(spec.get("name", "")) + "」"
-        if slot:
-            label = label + "的「" + slot + "」"
+        label = material_label(spec, slot)
         system = (
             "你是政务办事材料审核助手，判断用户上传的图片是不是一张合规的办事材料照片。"
             "看不清、明显是别的物件、是屏幕翻拍或截图、被严重遮挡——都算不合规。"
-            "只输出一个 JSON 对象，形如 {\"ok\": true, \"reason\": \"一句话中文原因\"}，"
-            "ok 为 true 表示合规。不要输出 JSON 以外的任何内容。"
+            "只输出一个 JSON 对象："
+            "{\"ok\": true 或 false, \"problem\": \"看到了什么问题\", \"fix\": \"拍照的人该怎么改\"}。"
+            "ok 为 true 时 problem 与 fix 留空串。"
+            "problem 与 fix 各写一句话、用日常口语、说具体："
+            "problem 说清画面里实际是什么、缺了什么（别抄证件号码，别出现「模型」「识别」这类词），"
+            "fix 写成可以直接照做的动作。"
+            "不要输出 JSON 以外的任何内容。"
         )
         ask = (
             "这份材料是" + label + "。"
@@ -170,15 +249,18 @@ class VisionChecker:
         ]
 
     @staticmethod
-    def describe_rejection(spec: Dict[str, Any], slot: str, model_reason: str) -> str:
-        """把模型的判断说成群众看得懂的一句话（不暴露模型名与内部 id）。"""
-        what = "「" + str(spec.get("name", "")) + "」"
-        if slot:
-            what = what + "的「" + slot + "」"
-        text = "这张图看起来不是" + what + "，请重新拍摄或选择。"
-        if model_reason:
-            text = text + "（" + model_reason + "）"
-        return text
+    def describe_rejection(spec: Dict[str, Any], slot: str, verdict: Dict[str, Any]) -> str:
+        """把模型的判断说成办事人看得懂、能照着改的一段话。
+
+        格式是「问题 + 怎么改」：问题尽量用模型的原话（更具体），怎么改优先用模型给的
+        动作，模型没给就用场景的 `fix_hint`，再兜底成通用说法。
+        """
+        label = material_label(spec, slot)
+        problem = verdict.get("problem") or ""
+        head = "这张图不像" + label + ("：" + problem if problem else "") + "。"
+        text = head + (verdict.get("fix") or default_fix(spec, slot))
+        # clean_text 会把模型话尾的标点去掉，这里补回来，保证整段是一个完整的句子
+        return text if text.endswith("。") else text + "。"
 
 
 def build_checker(moma=None, model: str = "", role: str = "sub"):
