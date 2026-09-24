@@ -1,7 +1,7 @@
 # 10 App 打包前检查清单
 
-> 状态：**H5 调试端已完成；App 端代码适配与依赖冲突都已解决，`npm run build:app` 可产出可导入 HBuilderX 的产物**。
-> 剩余：`appid` 待填；真机打包需 HBuilderX；第 4/5 条是多用户上线前的事。
+> 状态：**H5 调试端已完成；App 端代码适配、依赖冲突与打包配置均已就绪，`npm run build:app` 已产出可导入 HBuilderX 的产物**。
+> 剩余：`appid` 需换成 DCloud 正式值（`__UNI__` 开头，当前用项目名占位）；真机打包需 HBuilderX；第 4/5 条是多用户上线前的事。
 > 本文记录打包前必须处理的衔接问题（按严重程度排序），每条都给了代码位置与修法。
 
 ## 0. 依赖冲突：App 构建直接失败 ✅ 已解决
@@ -138,19 +138,31 @@ README 的"桩实现 → 真实接入"表里已经许了这件事，这里是它
 **修法**：上线前必须加鉴权（token / 会话校验）+ HTTPS + 访问控制。
 材料属敏感个人信息，这是**合规硬要求**，不是优化项。
 
-## 6. App 打包配置是空的 ✅ 部分解决
+## 6. App 打包配置 ✅ 已配置（appid 待换正式值）
 
-**已做**（`frontend/src/manifest.json`）：补上权限声明
+**已做**（`frontend/src/manifest.json`）：权限声明、应用标识与包名
 
 - Android：`INTERNET`、`ACCESS_NETWORK_STATE`、`CAMERA`、`READ_EXTERNAL_STORAGE`、`WRITE_EXTERNAL_STORAGE`；
-- iOS：`NSCameraUsageDescription`（拍摄办事材料）、`NSPhotoLibraryUsageDescription`（从相册选择）。
+- iOS：`NSCameraUsageDescription`（拍摄办事材料）、`NSPhotoLibraryUsageDescription`（从相册选择）；
+- `appid` = `one-stop-Agent`（项目名占位），Android `packagename` = `com.onestop.agent`。
+
+**Android 明文 HTTP 已解决**（真机连 `http://<局域网IP>:8000` 必需，否则报 `CLEARTEXT_NOT_PERMITTED`）：
+
+- `frontend/nativeResources/android/res/xml/network_security_config.xml`：放行明文；
+- `frontend/AndroidManifest.xml`：以 `android:networkSecurityConfig` 引用之。
+- ⚠️ 这两项**只在 HBuilderX 云打包时合并生效**——CLI 的 `uni build -p app` 不处理原生资源，
+  云打包前需把 `nativeResources/` 与 `AndroidManifest.xml` 放到 HBuilderX 工程对应位置。
+
+**App 端后端基址已配**：`frontend/.env.local` 写入 `VITE_API_BASE=http://10.195.130.130:8000`
+（当前局域网 IP，该文件被 `.gitignore` 的 `*.local` 忽略、不入库）；换网络后改这里，或构建时注入。
 
 **仍待办**：
 
-- **填 `appid`**（DCloud 应用标识）—— 目前是空串，需要你提供；
-- Android 9+ **默认禁止明文 HTTP**：推荐上 HTTPS；若必须明文，需在打包时配 `networkSecurityConfig`；
+- **`appid` 必须换成正式值**：DCloud 云打包只认开发者中心申请的 `__UNI__` 开头的 appid。
+  当前 `one-stop-Agent` 只能用于占位 / 离线打包，直接云打包会因"应用标识无效"失败——请申请后替换；
+- 上线前：改用 HTTPS，并把 `network_security_config.xml` 的 `cleartextTrafficPermitted` 收紧；
 - 真机首次跑通后，建议再核一遍最终 APK 的权限清单（Android 13+ 对相册的权限模型有变化）；
-- 打包命令已就绪：`npm run build:app`（或 HBuilderX 云打包）。
+- 打包命令已就绪且已验证：`npm run build:app`（产物在 `frontend/dist/build/app/`）。
 
 ## 已经做对、不用改的
 

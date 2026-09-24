@@ -1,6 +1,6 @@
 {
   "name": "一件事·一次办",
-  "appid": "",
+  "appid": "one-stop-Agent",
   "description": "高效办成一件事 · 多 Agent 智能体",
   "versionName": "0.1.0",
   "versionCode": "100",
@@ -11,6 +11,7 @@
     "compilerVersion": 3,
     "distribute": {
       "android": {
+        "packagename": "com.onestop.agent",
         "permissions": [
           "<uses-permission android:name=\"android.permission.INTERNET\"/>",
           "<uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\"/>",

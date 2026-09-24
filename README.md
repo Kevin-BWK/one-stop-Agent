@@ -80,7 +80,7 @@ one-stop-agent/
 | 语言 / 运行 | Python 3.10+ 标准库（dataclass） | Python + FastAPI + uvicorn |
 | 平台底座 | `MoMAClient`（桩 / 真实可切换） | 移动云 MoMA 多模型调度 / 路由 / 上下文 |
 | 模型 | deepseek-r1 / qwen-turbo / qwen-vl / 规则引擎（桩） | 九天大模型 + DeepSeek / Qwen / GLM / Qwen-VL |
-| 知识检索 | 按问题的本地检索基线（切分 + 字符 2-gram + 标题加权，零依赖，见 `docs/11`） | 向量库 + Embedding（BGE 等）RAG + 重排 |
+| 知识检索 | ✅ 关键词基线（切分 + 字符 2-gram + 标题加权，零依赖）+ 向量召回（可选，RRF 融合，见 `docs/11`） | 向量库（Milvus / pgvector）+ Embedding（BGE 等）+ Cross-Encoder 精排 |
 | 上下文 / 数据 | `SessionContext` / `InMemoryRepo` 内存 | Redis + PostgreSQL / MySQL |
 | 政务集成 | `MockGovServices` 本地模拟 | 市场监管 / 税务 / 消防 / 城管 / 卫健接口 |
 | 前端 | 暂未实现（预留，设计见「前端交互设计」） | uni-app（Vue 3 + TypeScript）：App（成品） / H5（测试用） + 事件推送（App: WebSocket / H5: SSE） |
@@ -98,7 +98,8 @@ python run_demo.py --query YJS0001
 
 # 冒烟测试（无需 pytest），按层组织
 python tests/test_condition_routing.py  # 规则层：条件判定矩阵（操作符 / 边界 / 组合 / 反向）
-python tests/test_knowledge.py          # 检索层：切分 / 打分 / 场景映射 / 兜底 / 咨询接线
+python tests/test_knowledge.py          # 检索层：关键词基线（切分 / 打分 / 场景映射 / 兜底 / 咨询接线）
+python tests/test_knowledge_vector.py   # 检索层（向量）：Embedding 客户端 / 语义召回 / RRF 融合 / 缓存 / 降级（离线）
 python tests/test_flow.py               # 编排层：MainAgent 闭环 + 流程节点 + 事件
 python tests/test_materials.py          # 材料层：清单 / 槽位 / 核验（含视觉核验与降级）/ 补正 / 撤回 / 受理拦截
 python tests/test_moma_client.py        # 模型层：MoMA 桩/真实、重试与降级（离线）
@@ -123,7 +124,7 @@ dev.bat -Stop               # 停止前后端
 | 模块 | 当前实现 | 真实接入 |
 | --- | --- | --- |
 | `app/moma/client.py` | ✅ 已支持真实 API（未配置环境变量时回退桩） | 配置 `MOMA_API_BASE` / `MOMA_API_KEY` 即启用 |
-| `app/knowledge/retriever.py` | 本地检索基线：两级切分 + 2-gram 打分（见 `docs/11`） | 向量检索 / Embedding + 重排（只换 `search()` 实现，契约不变） |
+| `app/knowledge/retriever.py` | ✅ 关键词基线 + 向量召回（RRF 融合；未配置自动降级，见 `docs/11`） | 配 `MOMA_EMBED_MODEL` 即启用向量；后续可换向量库（Milvus / pgvector）+ Cross-Encoder 精排 |
 | `app/mock_gov/services.py` | 本地内存模拟并联办理 | 对接真实政务系统 |
 | `app/storage/repo.py` | 内存 / JSON 文件（跨进程查询进度） | PostgreSQL / MySQL |
 | `app/agents/consult_agent.py` | 拼固定话术 | MoMA 对话模型（见 `docs/08`） |
@@ -170,7 +171,7 @@ dev.bat -Stop               # 停止前后端
 | `error` | `code` / `message` | 提示并恢复界面 |
 
 > 说明：**前端（uni-app）H5 调试端已实现**——聊天 + 动态表单 + 材料区 + 进度看板，H5 走 SSE、App 走 WebSocket（同一份代码，见 `frontend/src/api/stream.ts`）。
-> **App 成品端打包待做**（WebSocket 通道、相机权限等衔接问题见 `docs/10-App打包前检查清单.md`）。
+> **App 成品端打包：配置已就绪**——`appid` / 包名 / 权限 / 明文 HTTP（`nativeResources` + `AndroidManifest.xml`）/ 后端基址均已配，`npm run build:app` 已产出可导入 HBuilderX 的产物；剩 `appid` 换 DCloud 正式值与 HBuilderX 真机打包（见 `docs/10-App打包前检查清单.md`）。
 > 完整的事件契约与接口定义见 `docs/07-前端交互设计.md`。
 
 ## MoMA 真实接入
@@ -196,6 +197,16 @@ dev.bat -Stop               # 停止前后端
 | `MOMA_DISABLE_LIVE` | 设为 `1` 时忽略环境变量、强制桩模式（测试 / 离线演示用） |
 | `MOMA_MODEL_STRONG` / `_LIGHT` / `_VISION` / `_RULE` | 未配置角色模型时，按任务覆盖内置模型池 |
 | `MOMA_API_BASE` / `MOMA_API_KEY` | 兼容旧用法：作为主角色的回退配置 |
+
+知识检索的向量通道（可选，见 `docs/11`）：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `MOMA_EMBED_MODEL` | 向量模型名，**配了它才启用向量召回**（如 `bge-large-zh`） |
+| `MOMA_EMBED_API_BASE` / `MOMA_EMBED_API_KEY` | 向量端点与密钥，默认回退主角色配置 |
+| `MOMA_EMBED_MIN_SCORE` | 余弦相似度下限，低于它的召回丢弃，默认 `0.2` |
+
+未配置时检索走零依赖关键词基线，行为与之前完全一致；向量端点不可用会自动降级基线。
 
 **密钥安全（重要）**
 
@@ -233,6 +244,7 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - 受理入口统一：表单式（`/apply`）与对话式（`/api/session` + `/api/chat` + `/api/fields`）两条路径**共用同一套 `MainAgent` 编排与材料提交**；多轮会话只负责采集与材料清单，不再自行受理（见 `docs/09`）。
 - 对话式办理：聊天区可输入、随时插问；提问走会话（`ensureSession()` + `/api/ask` 带 `session_id`），服务端按会话记住问答，最近 3 轮历史带进模型上下文（见 `docs/08`）。
 - 知识检索：咨询时按问题检索办事指南片段作为作答依据（两级切分 + 字符 2-gram + 标题加权，零依赖）；真实/离线两条路径都带依据，不传知识库时行为不变（见 `docs/11`）。
+- 向量化检索：关键词基线之外新增 Embedding 向量召回，两路 **RRF 融合**（语义相近即可命中，如问"排烟"能找到"油烟净化设施"）；配 `MOMA_EMBED_MODEL` 即启用，向量落盘缓存、端点不可用自动降级，**对外契约不变**（见 `docs/11`）。
 - 文案自然语言化：结构化进度看板只进 CLI / 进度看板，**推给对话区的都是自然语言**；材料与事项一律用中文名，不出现 JSON 字面量、内部 id、模型名（见 `docs/08`）。
 - 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 uni-app 前端实时刷新进度预留。
 - 配置化条件路由：面积、油烟、生食/冷食、招牌、银行开户、用工人数等按规则增减事项与材料。
@@ -262,7 +274,7 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] FastAPI 服务层 + 多轮会话改造
 - [x] MoMA 真实 API 接入
 - [x] 前端 H5 调试端（uni-app：Vue 3 + TypeScript，协作 · 以 Anjie 为主）
-- [ ] 前端 App 成品端打包（代码适配与依赖冲突均已解决，`npm run build:app` 可出产物；剩**填 `appid`** 与 HBuilderX 真机打包，见 `docs/10`，协作 · 以 Anjie 为主）
+- [ ] 前端 App 成品端打包（代码适配、依赖与打包配置均已就绪，`npm run build:app` 已出产物，`appid` 已填项目名占位；剩**换 DCloud 正式 `appid`** 与 HBuilderX 真机打包，见 `docs/10`，协作 · 以 Anjie 为主）
 
 #### Anjie（组员）· 场景与业务
 
@@ -274,9 +286,9 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] 进度状态推进（流程节点打勾 + 部门子 Agent 办结回调 + 编排事件出口）
 - [x] 材料提交与核验（材料清单 / 逐项上传与核验 / 补正闭环 / 受理前置校验，见 `docs/09`）
 - [x] 前端 H5 调试端（uni-app，Vue 3 + TypeScript，主负责 · Kevin 协作）
-- [ ] 前端 App 成品端打包（代码适配与依赖冲突均已解决，`npm run build:app` 可出产物；剩**填 `appid`** 与 HBuilderX 真机打包，见 `docs/10`，主负责 · Kevin 协作）
+- [ ] 前端 App 成品端打包（代码适配、依赖与打包配置均已就绪，`npm run build:app` 已出产物，`appid` 已填项目名占位；剩**换 DCloud 正式 `appid`** 与 HBuilderX 真机打包，见 `docs/10`，主负责 · Kevin 协作）
 - [x] 知识检索基线（按问题检索指南片段，见 `docs/11`）
-- [ ] 向量化检索（Embedding + 向量库 + 重排，见 `docs/11`）
+- [x] 向量化检索（Embedding 召回 + 关键词 RRF 融合 + 缓存 / 降级，见 `docs/11`）
 - [x] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
 
 ## 路线图
@@ -284,11 +296,11 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] 双场景骨架 + 完整编排闭环 + 条件路由
 - [x] 进度状态推进（让“办理进度”可变化）
 - [x] uni-app 前端 H5 调试端（聊天 + 动态表单 + 材料区 + 进度看板，SSE 事件推送，见「前端交互设计」）
-- [ ] uni-app App 成品端打包（**前端适配与依赖冲突均已解决**：`uni.request` 跨端 + 可配绝对基址 + 条件编译选通道 + 权限声明 + `@vue/shared` override；`npm run build:app` 可出产物，剩**填 `appid`** 与 HBuilderX 真机打包，见 `docs/10-App打包前检查清单.md`）
+- [ ] uni-app App 成品端打包（**前端适配、依赖冲突与打包配置均已解决**：`uni.request` 跨端 + 可配绝对基址 + 条件编译选通道 + 权限声明 + 明文 HTTP（`nativeResources` + `AndroidManifest.xml`）+ `@vue/shared` override；`npm run build:app` 已出产物，`appid` 已填项目名占位，剩**换 DCloud 正式 `appid`** 与 HBuilderX 真机打包，见 `docs/10-App打包前检查清单.md`）
 - [x] 对话式办理（聊天区可输入、随时插问；提问走会话带多轮上下文，见 `docs/08`）
 - [x] 材料提交与核验（材料清单 + 逐项上传核验 + 补正闭环 + 受理前置校验，见 `docs/09`）
 - [x] 提交前置校验 + 文案自然语言化（去 JSON 字面量与内部 id；结构化看板只进 CLI，对话区只收自然语言，见 `docs/08`）
 - [x] MoMA 真实 API 接入（桩/真实一键切换，主/子双角色）
 - [x] 知识检索基线（按问题检索指南片段：两级切分 + 字符 2-gram + 标题加权，零依赖，见 `docs/11`）
-- [ ] 向量化检索（Embedding + 向量库 + 重排；替换 `search()` 实现即可，契约不变，见 `docs/11`）
+- [x] 向量化检索（Embedding 召回 + 关键词 RRF 融合；配 `MOMA_EMBED_MODEL` 即启用，未配置自动降级，契约不变，见 `docs/11`）
 - [x] 多模态材料核验（视觉核验器：图片 + 提示词交 `qwen-vl` 判断是否合规件；模型不可用自动回落桩规则，见 `docs/09`）

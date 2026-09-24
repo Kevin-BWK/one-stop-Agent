@@ -1,6 +1,7 @@
 # 11 知识检索与 RAG
 
-> 状态：**已实现本地检索基线**（零依赖）；真实形态换成向量检索 / Embedding，**对外契约不变**。
+> 状态：**已实现 本地检索基线（零依赖）+ 向量检索（可选，配 `MOMA_EMBED_MODEL` 即启用）**；
+> 两路结果用 RRF 融合，向量不可用时自动降级基线，**对外契约自始至终不变**（见第 7 节）。
 
 ## 1. 先修一个潜伏 bug：知识库此前是"摆设"
 
@@ -27,7 +28,7 @@ search(scenario_id, query, top_k=3)          # -> [Chunk]，按相关度降序�
 retrieve(scenario_id, query="", top_k=3)     # -> str，拼成文本；无命中/无查询时兜底整篇
 ```
 
-**契约稳定**的意思是：接真实 RAG 时只改 `app/knowledge/retriever.py` 内部，
+**契约稳定**的意思是：换检索实现时只动 `app/knowledge/`（`retriever.py` + `embedding.py`），
 调用方（`ConsultAgent`）一行不用动。
 
 `retrieve` 的兜底行为是刻意保留的——旧调用方（`retrieve(scenario_id)` 只要整篇）
@@ -91,12 +92,64 @@ python tests/test_knowledge.py
 异常输入不炸（None / 空 / emoji / 超长 / 特殊字符 / 非法 top_k），
 以及**咨询 Agent 的接线**（离线回答带依据、真实模式进 system prompt、不传知识库时行为不变、知识库抛异常不影响咨询）。
 
-## 7. 换成真实 RAG 时
+## 7. 向量检索（可选通道，已实现）
 
-| 环节 | 现在 | 真实形态 |
+关键词基线解决的是"**字面能对上**"：问"油烟"能找到"油烟净化设施"。
+但问"排烟"就找不到了——语义相近、字面不同，正是向量检索的用武之地。
+现已在**不改对外契约**的前提下接入（`app/knowledge/embedding.py`）。
+
+### 7.1 开关：配了才启用
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `MOMA_EMBED_MODEL` | 向量模型名，**配了它才启用向量检索**（如 `bge-large-zh`） |
+| `MOMA_EMBED_API_BASE` | 向量端点，默认回退 `MOMA_MAIN_API_BASE` / `MOMA_API_BASE` |
+| `MOMA_EMBED_API_KEY` | 向量密钥，默认回退 `MOMA_MAIN_API_KEY` / `MOMA_API_KEY` |
+| `MOMA_EMBED_MIN_SCORE` | 余弦相似度下限，低于它的召回直接丢弃，默认 `0.2` |
+
+- 调用的是 OpenAI 兼容的 `POST {API_BASE}/embeddings`，**与 MoMA 同一套地址即可**；
+- 未配置时 `EmbeddingClient.available` 为 `False`，`search()` 自动走关键词基线，
+  行为与接入前一致（既有测试原样通过）；
+- `MOMA_DISABLE_LIVE=1` 同样能强制停用（测试 / 离线演示），与 `MoMAClient` 共用一个总闸。
+
+### 7.2 两路召回 + RRF 融合
+
+```
+问题 ──┬─ 关键词基线召回（2-gram，永远跑）──┐
+       └─ 向量召回（余弦，配了才跑）     ──┴─ RRF 融合 → top_k
+```
+
+不同通道的分数（余弦相似度 vs 关键词权重）量纲不同，**直接相加没有意义**；
+RRF 只看"排第几"：`score(d) = Σ 1 / (k + rank(d))`，
+天然偏好**两路都命中**的片段。
+
+### 7.3 缓存与降级
+
+- **向量缓存**：片段向量落盘到 `data/runtime/knowledge_vectors/{场景}.json`，
+  带模型名 + 文本指纹；模型换了或指南改了自动失效，重启不再重复调用端点；
+- **惰性构建**：首次检索该场景时才建索引，不拖慢服务启动；
+- **自动降级**：端点超时 / 报错 → 静默回退关键词基线，且**本进程内不再重试**
+  （否则每次咨询都要卡一次超时）。检索是增强项，不该让"咨询"跟着失败；
+- **密钥安全**：`EmbeddingClient.describe()` 从不包含密钥。
+
+### 7.4 验证
+
+```bash
+python tests/test_knowledge_vector.py
+```
+
+用一个人造的"概念 one-hot"假模型（**离线、不联网**）验证**链路**而非模型能力：
+请求形状（`/embeddings` 的 model / input / 鉴权头）、index 乱序归位、坏返回报错、
+4xx 不重试 / 网络抖动重试、**"排烟"→"油烟净化设施"的语义召回**、
+RRF 偏好一致命中、缓存复用（重启不重算）、端点失败降级且无重试风暴，
+以及**未配置时契约逐字节不变**。
+
+## 8. 再往后的演进
+
+| 环节 | 现在 | 再往后 |
 | --- | --- | --- |
 | 切分 | 标题 / 段落 / 列表项 | 按 token 数窗口切 + 重叠 |
-| 召回 | 2-gram 重叠打分 | Embedding（BGE 等）+ 向量库（Milvus / pgvector） |
-| 重排 | 无 | Cross-Encoder 重排 / RRF 融合 |
-| 存储 | 启动时读 `data/knowledge/*.md` | 文档入库 + 增量更新 |
+| 召回 | 关键词 2-gram + 向量（可选） | 纯向量 + 向量库（Milvus / pgvector） |
+| 重排 | RRF 融合 | Cross-Encoder 精排 / RRF 叠加 |
+| 存储 | 启动读 `data/knowledge/*.md` + 向量落盘缓存 | 文档入库 + 增量更新 |
 | 契约 | `search` / `retrieve` | **不变** |

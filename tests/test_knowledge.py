@@ -6,12 +6,17 @@
 用法：python tests/test_knowledge.py
 """
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
+
+# 本文件测的是**零依赖的关键词基线**：显式停用真实调用，避免本机 .env 配了
+# 向量模型 / 端点时把离线断言带偏（向量检索另见 tests/test_knowledge_vector.py）。
+os.environ.setdefault("MOMA_DISABLE_LIVE", "1")
 
 from app.knowledge.retriever import (NOT_FOUND, KnowledgeBase, _Entry,
                                      format_chunks, split_chunks, tokenize)
