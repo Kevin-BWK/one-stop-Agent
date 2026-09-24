@@ -100,7 +100,7 @@ python run_demo.py --query YJS0001
 python tests/test_condition_routing.py  # 规则层：条件判定矩阵（操作符 / 边界 / 组合 / 反向）
 python tests/test_knowledge.py          # 检索层：切分 / 打分 / 场景映射 / 兜底 / 咨询接线
 python tests/test_flow.py               # 编排层：MainAgent 闭环 + 流程节点 + 事件
-python tests/test_materials.py          # 材料层：清单 / 槽位 / 核验 / 补正 / 撤回 / 受理拦截
+python tests/test_materials.py          # 材料层：清单 / 槽位 / 核验（含视觉核验与降级）/ 补正 / 撤回 / 受理拦截
 python tests/test_moma_client.py        # 模型层：MoMA 桩/真实、重试与降级（离线）
 python tests/test_server_smoke.py       # 服务层：多轮会话闭环（零第三方依赖）
 python tests/test_api_e2e.py            # 接口层：端到端 HTTP + 异常分支
@@ -127,7 +127,7 @@ dev.bat -Stop               # 停止前后端
 | `app/mock_gov/services.py` | 本地内存模拟并联办理 | 对接真实政务系统 |
 | `app/storage/repo.py` | 内存 / JSON 文件（跨进程查询进度） | PostgreSQL / MySQL |
 | `app/agents/consult_agent.py` | 拼固定话术 | MoMA 对话模型（见 `docs/08`） |
-| `app/agents/verify_agent.py` | 形式校验 + 一条可解释的桩内容核验（图片过小判为“需补正”），**不读真实图像内容** | MoMA 多模态识别 + 规则校验（见 `docs/09`） |
+| `app/agents/verify_agent.py` | 形式校验 + 可插拔内容核验：配了多模态模型就把图片交给 `qwen-vl` 判断是否合规件，否则回落桩规则（图片过小判为“需补正”） | 更细的要素级校验（证号 / 有效期 / 与表单字段比对，见 `docs/09`） |
 | `app/agents/item_agent.py` | 直接返回“已办结” | 调用各部门政务系统，异步回调（见 `docs/06`） |
 | `app/materials/store.py` | 材料与文件落本地磁盘 `data/runtime/materials/` | 对象存储（OSS / COS）+ 文件编号 |
 | 电子证照共享 | **未做**（所有材料都要求上传） | 对接本地电子证照库，材料条目加 `source` 字段（见 `docs/09`） |
@@ -233,6 +233,7 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - 受理入口统一：表单式（`/apply`）与对话式（`/api/session` + `/api/chat` + `/api/fields`）两条路径**共用同一套 `MainAgent` 编排与材料提交**；多轮会话只负责采集与材料清单，不再自行受理（见 `docs/09`）。
 - 对话式办理：聊天区可输入、随时插问；提问走会话（`ensureSession()` + `/api/ask` 带 `session_id`），服务端按会话记住问答，最近 3 轮历史带进模型上下文（见 `docs/08`）。
 - 知识检索：咨询时按问题检索办事指南片段作为作答依据（两级切分 + 字符 2-gram + 标题加权，零依赖）；真实/离线两条路径都带依据，不传知识库时行为不变（见 `docs/11`）。
+- 多模态材料核验：内容核验可插拔——配了多模态模型就把图片（`data:` URL）连同"这是哪份材料的哪个槽位、用途是什么"交给视觉模型判断是否合规件；模型不可用/超时/返回无法解析一律回落桩规则，不因模型故障卡住办事（见 `docs/09`）。
 - 文案自然语言化：结构化进度看板只进 CLI / 进度看板，**推给对话区的都是自然语言**；材料与事项一律用中文名，不出现 JSON 字面量、内部 id、模型名（见 `docs/08`）。
 - 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 uni-app 前端实时刷新进度预留。
 - 配置化条件路由：面积、油烟、生食/冷食、招牌、银行开户、用工人数等按规则增减事项与材料。
@@ -277,7 +278,7 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [ ] 前端 App 成品端打包（WebSocket 通道 + 权限声明，主负责 · Kevin 协作）
 - [x] 知识检索基线（按问题检索指南片段，见 `docs/11`）
 - [ ] 向量化检索（Embedding + 向量库 + 重排，见 `docs/11`）
-- [ ] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
+- [x] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
 
 ## 路线图
 
@@ -291,4 +292,4 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] MoMA 真实 API 接入（桩/真实一键切换，主/子双角色）
 - [x] 知识检索基线（按问题检索指南片段：两级切分 + 字符 2-gram + 标题加权，零依赖，见 `docs/11`）
 - [ ] 向量化检索（Embedding + 向量库 + 重排；替换 `search()` 实现即可，契约不变，见 `docs/11`）
-- [ ] 多模态材料核验
+- [x] 多模态材料核验（视觉核验器：图片 + 提示词交 `qwen-vl` 判断是否合规件；模型不可用自动回落桩规则，见 `docs/09`）
