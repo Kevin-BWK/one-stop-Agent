@@ -1,59 +1,84 @@
 # 10 App 打包前检查清单
 
-> 状态：**H5 调试端已完成，App 成品端尚未打包**。
+> 状态：**H5 调试端已完成；App 端代码适配已完成（第 1/2/3/6 条）；App 仍不能打包**。
+> 剩余：**依赖冲突（第 0 条）** 未解决；`appid` 待填；真机打包需 HBuilderX。
 > 本文记录打包前必须处理的衔接问题（按严重程度排序），每条都给了代码位置与修法。
-> 前 4 条都是"让 App 能连上后端"，现在改成本最低。
 
-## 1. `fetch` 用了相对路径，App 端必挂（最严重）
+## 0. 依赖冲突：App 构建直接失败（当前唯一硬阻塞）
+
+**现象**：`npm run build:app` 报
+`"normalizeCssVarValue" is not exported by "@vue/shared"`。
+
+**H5 构建不受影响**（走的解析路径不同），所以这个问题一直没暴露。
+
+**根因**（实测版本）：
+
+| 包 | 装到的版本 |
+| --- | --- |
+| `vue` | 3.5.43 |
+| `@vue/runtime-core` | 3.5.43 |
+| `@vue/shared` | **3.4.21** ← 落后一档 |
+
+`package.json` 写的是 `vue: ^3.4.21` / `@vue/runtime-core: ^3.4.21`，`^` 让它们漂到了 3.5.43；
+而 `@dcloudio/*` 把 `@vue/shared` 钉在 `3.4.21`。于是 `@vue/runtime-core@3.5` 要用的
+`normalizeCssVarValue`（3.5 才有）在 `@vue/shared@3.4` 里找不到。
+
+**别改错方向**：曾试过把 `vue` / `@vue/runtime-core` 降到 `3.4.21` 去对齐，结果错误换成
+`"isInSSRComponentSetup" is not exported by "vue"` —— 这版 `@dcloudio/uni-app` 是**按 vue 3.5 构建的**
+（`isInSSRComponentSetup` 在 3.4.21 里不存在）。**要对齐的是 `@vue/shared`，不是 `vue`。**
+
+**修法**（二选一）：
+
+- **A（推荐，改动小）**：把 `@vue/shared` 顶到与 `vue` 同版本
+
+  ```json
+  "overrides": { "@vue/shared": "$vue" }
+  ```
+
+  同时把 `vue` / `@vue/runtime-core` 钉成**确切版本**（继续用 `^` 会再次漂移）。
+  注意 lockfile 已把这个不匹配固化了，需删掉 `package-lock.json` 重装才解得开。
+- **B（更彻底）**：把整套 `@dcloudio/*` 升到支持 vue 3.5 的版本，再统一 `vue` / `@vue/shared`。
+
+> 这两条不是纯技术选择（A 是"覆盖 uni 声明的版本"，B 是"整体升级 uni 组件"），
+> 属于**团队的依赖策略**，建议与前端负责人确认后再动。
+
+**另一个待确认项**：`@dcloudio/uni-app-plus` **尚未安装**。修完上面的冲突后若 App 构建仍失败，
+多半还差它（App 平台插件）。
+
+## 1. `fetch` 用了相对路径，App 端必挂 ✅ 已解决
 
 **现象**：H5 靠 vite 代理把 `/api` 转给后端（同源），所以相对路径能用；
 App 端**没有代理**，相对路径会打到 WebView 自己的基址（`file:///android_asset/...`），请求到不了后端。
 
-**证据**（`frontend/src/api/http.ts`）：
+**已做**：
 
-```ts
-const API_BASE = ''                              // L7
-fetch('/scenarios/' + scenarioId)                // L41  ← 没带 API_BASE
-fetch('/api/cases/' + caseId)                    // L49  ← 没带
-fetch('/api/ask', {...})                         // L63  ← 没带
-fetch(API_BASE + '/api/materials/intake', ...)   // L81  ← 带了
-```
+- 新增 `frontend/src/api/platform.ts`，把"后端基址"收口成 `apiUrl()` / `wsUrl()`；
+- **所有**网络地址一律过 `apiUrl()`——没走这个函数的路径**不可能**存在（`uni.request` / `uni.uploadFile` / SSE / WS 都从它取地址）；
+- `API_BASE` 改为构建时可配：`frontend/.env.local` 里的 `VITE_API_BASE`，或构建时注入；
+- H5 调试端留空即走代理，**行为与接入前完全一致**；
+- App 端没配基址时**直接报错**（"App 端未配置后端地址"），而不是静默打错地址。
+  后者会表现为"请求发不出去但也不报错"，最难查。
 
-**修法**：**所有** `fetch(` 调用统一带上 `API_BASE`（上面三处 + 之后新增的 `createSession` 等；
-本节行号写于记录时，会随后续改动漂移，改的时候按 `fetch(` 全量搜一遍）；并把 `API_BASE`
-改成可配置（构建时注入，或从 `manifest.json` 的 `app-plus.distribute` / extra 读取），
-而不是硬编码空串。
+**已验证**：不配基址时构建产物里**没有**绝对地址（走代理）；配了 `VITE_API_BASE=http://192.168.1.10:8000`
+后产物里**带上了**该地址。
 
-> 注意：`uni.uploadFile` / `uni.request` 走原生，不需要 `API_BASE` 也能跨域，但**相对路径同样要不得**
-> ——App 端没有代理，相对路径会打到 WebView 自己的基址。所以凡是网络调用，URL 都必须是绝对地址。
-
-## 2. 后端没有 CORS
+## 2. 后端没有 CORS ✅ 已解决
 
 **现象**：`uni.uploadFile` 走原生（plus.net），不受 CORS 限制；
 但 `fetch` 是 WebView 的原生 fetch，跨域请求需要后端返回 `Access-Control-Allow-Origin`。
 
-**证据**：在 `server/` 里搜 `CORS` / `add_middleware` / `allow_origins` → **0 命中**。
+**已做**：按推荐方案，把 `frontend/src/api/http.ts` 里的 `fetch` **全部换成 `uni.request`**
+（App 走 plus.net 原生，不受 CORS 限制），而不是给后端加 `CORSMiddleware`。
+顺带统一了各端对 JSON 响应体的差异（H5 自动解析、部分端给字符串）。
 
-**修法**（二选一）：
+> `uni.uploadFile` / `uni.connectSocket` 本来就走原生，无需改动。
 
-- 后端加 `CORSMiddleware`（简单，但要维护白名单）；
-- 前端把 `fetch` 全部换成 `uni.request`（走原生，彻底绕开 CORS，也更贴合 uni-app 跨端习惯）。**推荐**。
+## 3. `isH5()` 在 App 端误判，走错传输通道 ✅ 已解决
 
-## 3. `isH5()` 在 App 端误判，走错传输通道
+**现象**：App 是把页面跑在 WebView 里的，`window` 与 `EventSource` **都存在**，
+于是原来的 `isH5()` 返回 `true` → 用 SSE 而不是 WebSocket，与 `docs/07` 定的方案不符。
 
-**现象**：uni-app 的 App 是把页面跑在 WebView 里的，`window` 与 `EventSource` **都存在**，
-于是 `isH5()` 返回 `true` → 用 SSE 而不是 WebSocket。而 `docs/07` 定的方案是"App 成品端走 WebSocket"。
-
-**证据**（`frontend/src/api/stream.ts`）：
-
-```ts
-export function isH5(): boolean {                                    // L29
-  return typeof window !== 'undefined' && typeof (window as any).EventSource !== 'undefined'
-}
-```
-
-**修法**：改用 uni-app 条件编译（`// #ifdef H5` / `// #ifndef H5`），
-或 `uni.getSystemInfoSync().uniPlatform === 'web'`。
+**已做**：`isH5()` 改用 uni-app **条件编译**（`// #ifdef H5`），不再靠 `window` / `EventSource` 探测。
 
 ## 4. 服务端是"单进程 + 内存状态"，多用户会出问题
 
@@ -78,15 +103,18 @@ README 的"桩实现 → 真实接入"表里已经许了这件事，这里是它
 **修法**：上线前必须加鉴权（token / 会话校验）+ HTTPS + 访问控制。
 材料属敏感个人信息，这是**合规硬要求**，不是优化项。
 
-## 6. App 打包配置是空的
+## 6. App 打包配置是空的 ✅ 部分解决
 
-**证据**（`frontend/src/manifest.json`）：`appid` 是空串，`app-plus` 里**没有任何权限声明**。
+**已做**（`frontend/src/manifest.json`）：补上权限声明
 
-**修法**：
+- Android：`INTERNET`、`ACCESS_NETWORK_STATE`、`CAMERA`、`READ_EXTERNAL_STORAGE`、`WRITE_EXTERNAL_STORAGE`；
+- iOS：`NSCameraUsageDescription`（拍摄办事材料）、`NSPhotoLibraryUsageDescription`（从相册选择）。
 
-- 填 `appid`（DCloud 应用标识）；
-- 声明权限：相机、相册（`uni.chooseImage({sourceType:['camera','album']})` 需要）、网络；
-- Android 9+ **默认禁止明文 HTTP**：要么上 HTTPS，要么配 `networkSecurityConfig`；
+**仍待办**：
+
+- **填 `appid`**（DCloud 应用标识）—— 目前是空串，需要你提供；
+- Android 9+ **默认禁止明文 HTTP**：推荐上 HTTPS；若必须明文，需在打包时配 `networkSecurityConfig`；
+- 真机首次跑通后，建议再核一遍最终 APK 的权限清单（Android 13+ 对相册的权限模型有变化）；
 - 打包命令已就绪：`npm run build:app`（或 HBuilderX 云打包）。
 
 ## 已经做对、不用改的
@@ -102,5 +130,5 @@ README 的"桩实现 → 真实接入"表里已经许了这件事，这里是它
 | 阶段 | 要解决 | 工作量 |
 | --- | --- | --- |
 | 现在（H5 调试） | 无 | 0 |
-| **第一次真机跑 App** | 1、2、3、6 | 半天（都是小改） |
+| **第一次真机跑 App** | **0（依赖冲突）**、填 `appid`、明文 HTTP 策略 | 半天以内（第 1/2/3/6 条已完成） |
 | **给多个真实用户用** | 4、5 | 大改（Redis + 数据库 + 鉴权） |
