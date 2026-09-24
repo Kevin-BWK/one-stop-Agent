@@ -16,7 +16,7 @@
 ``MOMA_EMBED_MODEL``           向量模型名，**配了它才启用向量检索**（如 bge-large-zh）
 ``MOMA_EMBED_API_BASE``        向量端点，默认回退 ``MOMA_MAIN_API_BASE`` / ``MOMA_API_BASE``
 ``MOMA_EMBED_API_KEY``         向量密钥，默认回退 ``MOMA_MAIN_API_KEY`` / ``MOMA_API_KEY``
-``MOMA_EMBED_MIN_SCORE``       余弦相似度下限，低于它的召回直接丢弃，默认 0.2
+``MOMA_EMBED_MIN_SCORE``       余弦相似度下限，低于它的召回直接丢弃（不配则按模型名取默认）
 =============================  ==================================================
 
 ``MOMA_TIMEOUT`` / ``MOMA_MAX_RETRIES`` / ``MOMA_DISABLE_LIVE`` 同样生效。
@@ -35,6 +35,28 @@ from ..config import load_env_file
 
 # 一次请求最多带多少段文本：片段很少，主要是防止将来语料变大时超出接口上限
 BATCH_SIZE = 16
+
+# 余弦相似度下限的通用兜底默认值
+DEFAULT_MIN_SCORE = 0.2
+# 不同 embedding 模型的余弦分布差异很大（BGE 系普遍偏高、OpenAI 偏低），
+# 单一阈值不通用；未显式配置 MOMA_EMBED_MIN_SCORE 时按模型名取默认值。
+MIN_SCORE_BY_MODEL = (
+    ("bge", 0.45),
+    ("text-embedding-3", 0.30),
+    ("m3e", 0.40),
+    ("gte", 0.40),
+    ("qwen", 0.40),
+    ("glm", 0.35),
+)
+
+
+def default_min_score(model: Optional[str]) -> float:
+    """按模型名给一个合理的余弦下限；认不出就退回 `DEFAULT_MIN_SCORE`。"""
+    name = (model or "").lower()
+    for keyword, value in MIN_SCORE_BY_MODEL:
+        if keyword in name:
+            return value
+    return DEFAULT_MIN_SCORE
 
 
 class EmbeddingError(RuntimeError):
@@ -94,7 +116,15 @@ class EmbeddingClient:
         self.max_retries = int(
             max_retries if max_retries is not None else os.getenv("MOMA_MAX_RETRIES", "2")
         )
-        self.min_score = float(os.getenv("MOMA_EMBED_MIN_SCORE", "0.2"))
+        # 阈值优先级：显式环境变量 > 按模型名的默认值 > 通用兜底。
+        # 硬编码一个值会把召回要么砍光（模型分布偏低）、要么放进噪声（分布偏高）。
+        raw_min_score = os.getenv("MOMA_EMBED_MIN_SCORE")
+        if raw_min_score is not None and raw_min_score.strip():
+            self.min_score = float(raw_min_score)
+            self.min_score_source = "env"
+        else:
+            self.min_score = default_min_score(self.model)
+            self.min_score_source = "model-default"
         self._session = session  # 可注入（测试用，避免真实网络）
         self._sleep = sleep or time.sleep
 
@@ -137,6 +167,7 @@ class EmbeddingClient:
             "api_base": self.api_base,
             "model": self.model,
             "min_score": self.min_score,
+            "min_score_source": self.min_score_source,
             "timeout": self.timeout,
             "max_retries": self.max_retries,
         }

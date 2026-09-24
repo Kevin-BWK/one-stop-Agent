@@ -32,6 +32,11 @@ class ConsultAgent(BaseAgent):
     # 每次咨询带进办事指南的最大片段数
     TOP_K = 3
 
+    # 检索 query 里最多拼入几轮历史**用户**提问（约 1 轮），避免把当前问题淹没
+    SEARCH_HISTORY = 2
+    # 单条历史在检索 query 里的最大字符数（长句只留开头，够定位话题即可）
+    SEARCH_HISTORY_CHARS = 120
+
     def answer(self, question, scenario, knowledge=None):
         """作答。传入 `knowledge` 时会先检索办事指南作为依据。"""
         model = self.model_for()
@@ -54,10 +59,36 @@ class ConsultAgent(BaseAgent):
         if knowledge is None:
             return []
         try:
-            return knowledge.search(scenario.get("id", ""), question or "", top_k=self.TOP_K)
+            return knowledge.search(scenario.get("id", ""), self._search_query(question),
+                                    top_k=self.TOP_K)
         except Exception:
             # 检索是增强项：它出问题不该让"咨询"整个失败
             return []
+
+    def _search_query(self, question):
+        """把最近几轮**用户提问**拼进检索 query（只影响检索，不改发给模型的消息）。
+
+        用户常问省略句（"那第二个呢""这个要多少钱"），只拿当前这句去检索会跑偏；
+        带上上文才定位得到话题。发给模型的消息仍用原问题——多轮上下文由
+        `context.history()` 在 `_messages()` 里负责，两者互不干扰。
+        """
+        text = (question or "").strip()
+        if self.context is None:
+            return text
+        try:
+            history = self.context.history()
+        except Exception:
+            return text
+        recent = []
+        for item in history:
+            if item.get("role") != "user":
+                continue
+            content = str(item.get("content") or "").strip()
+            if content:
+                recent.append(content[:self.SEARCH_HISTORY_CHARS])
+        if not recent:
+            return text
+        return " ".join(recent[-self.SEARCH_HISTORY:] + [text])
 
     # ---------- 给模型的消息 ----------
 

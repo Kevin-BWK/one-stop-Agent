@@ -10,16 +10,20 @@
    （问"排烟"也能找到"油烟净化设施"），见 `app/knowledge/embedding.py`。
 
 两路结果用 **RRF（倒数排名融合）** 合并——向量懂语义、关键词抓字面，互补后更稳。
-向量端点不可用时**自动降级**到关键词基线，检索（进而咨询）不会因此失败。
-`ConsultAgent` 等调用方一行都不用改。
+向量端点不可用时**自动降级**到关键词基线（进入冷却期，过后自动重试），
+检索（进而咨询）不会因此失败。`ConsultAgent` 等调用方一行都不用改。
+
+「配了向量却没生效」这类问题不用猜：`explain()` 给出单次检索的完整快照
+（命中片段、两路分数、实际通道、降级原因），`stats()` 给出累计计数。
 
 零依赖的中文检索为什么用 2-gram：中文没有空格，没有分词器时按"相邻两字"切
 已经能覆盖绝大多数中文词组（"油烟"、"材料"、"营业执照"），且不需要词典。
 """
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .embedding import (EmbeddingClient, EmbeddingError, VectorIndex, fingerprint,
                         load_vectors, save_vectors)
@@ -30,6 +34,8 @@ NOT_FOUND = "未找到该场景办事指南。"
 RRF_K = 60
 # 向量召回候选倍数：先多召回一些再融合，给 RRF 留出排序空间
 VECTOR_CANDIDATES = 4
+# 向量构建失败后的冷却秒数：期间走基线，冷却结束自动再试（端点恢复后无需重启进程）
+VECTOR_RETRY_COOLDOWN = 60.0
 
 # 标题命中的权重：问题里的词如果出现在小节标题上，通常比出现在正文里更相关
 TITLE_WEIGHT = 3.0
@@ -61,6 +67,55 @@ class _Entry:
     text: str
     heading_tokens: frozenset = field(default_factory=frozenset)
     text_tokens: frozenset = field(default_factory=frozenset)
+
+
+@dataclass
+class _Hit:
+    """一次召回命中的片段及其**分数来源**（可观测性靠它，见 `explain()`）。"""
+    index: int
+    entry: _Entry
+    score: float                              # 最终分数（融合后，或纯关键词分）
+    vector_score: Optional[float] = None      # 该片段的余弦相似度（没走向量时为 None）
+    keyword_score: Optional[float] = None     # 该片段的关键词分（没被关键词命中时为 None）
+
+
+@dataclass
+class RetrievalResult:
+    """一次检索的完整过程快照：`search()` 只用它的 hits，`explain()` 暴露全部。"""
+    scenario_id: str
+    doc_key: str
+    query: str
+    channel: str                              # "keyword" 或 "vector+keyword"
+    hits: List[_Hit] = field(default_factory=list)
+    degraded: str = ""                        # 降级原因；空串表示向量通道正常工作
+    vector_model: str = ""
+    vector_min_score: float = 0.0
+    elapsed_ms: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "scenario_id": self.scenario_id,
+            "doc_key": self.doc_key,
+            "query": self.query,
+            "channel": self.channel,
+            "degraded": self.degraded,
+            "vector_model": self.vector_model,
+            "vector_min_score": self.vector_min_score,
+            "elapsed_ms": round(self.elapsed_ms, 3),
+            "hits": [
+                {
+                    "index": hit.index,
+                    "heading": hit.entry.heading,
+                    "text": hit.entry.text,
+                    "score": round(hit.score, 6),
+                    "vector_score": (round(hit.vector_score, 6)
+                                     if hit.vector_score is not None else None),
+                    "keyword_score": (round(hit.keyword_score, 6)
+                                      if hit.keyword_score is not None else None),
+                }
+                for hit in self.hits
+            ],
+        }
 
 
 def tokenize(text: str) -> List[str]:
@@ -171,8 +226,16 @@ class KnowledgeBase:
             Path(cache_dir) if cache_dir
             else self.data_dir.parent / "runtime" / "knowledge_vectors"
         )
-        self._vectors: Dict[str, VectorIndex] = {}   # 已建好的向量索引（按场景缓存）
-        self._vector_failed: set = set()             # 构建失败的场景：本进程内不再重试
+        self._vectors: Dict[str, VectorIndex] = {}    # 已建好的向量索引（按场景缓存）
+        self._vector_failed: Dict[str, float] = {}     # 场景 -> 冷却结束时间（过了自动重试）
+        # 可注入的时钟与冷却时长：便于测试"端点恢复后自动回归向量"（见 tests）
+        self._clock = time.monotonic
+        self.vector_retry_cooldown = VECTOR_RETRY_COOLDOWN
+        # 轻量计数：让"检索到底有没有生效"可观测（见 stats()）
+        self._stats: Dict[str, int] = {
+            "searches": 0, "vector_used": 0, "degraded": 0,
+            "cache_hits": 0, "embed_calls": 0,
+        }
 
     # ---------- 对外 ----------
 
@@ -186,29 +249,103 @@ class KnowledgeBase:
         查询为空时直接返回空——"没问"不该等于"问什么都能匹配"。
 
         召回分两路：关键词基线永远跑；向量通道启用且可用时，两路结果用 RRF 融合。
+        想知道"命中了什么、分从哪来、有没有降级"，用 `explain()`。
         """
+        result = self._retrieve(scenario_id, query, top_k)
+        return [
+            Chunk(scenario_id=scenario_id, heading=hit.entry.heading,
+                  text=hit.entry.text, score=hit.score)
+            for hit in result.hits
+        ]
+
+    def explain(self, scenario_id: str, query: str, top_k: int = 3) -> Dict[str, Any]:
+        """检索过程的可观测快照（只读、无副作用），给调试与评估用。
+
+        返回命中的片段、**每个片段的两路分数**、实际走的通道，以及降级原因——
+        「配了向量却没生效」看一次就知道是没配置、在冷却、还是构建失败。
+        """
+        return self._retrieve(scenario_id, query, top_k).to_dict()
+
+    def stats(self) -> Dict[str, int]:
+        """累计计数：检索次数 / 向量生效次数 / 降级次数 / 缓存命中 / 向量调用。"""
+        return dict(self._stats)
+
+    def _retrieve(self, scenario_id: str, query: str, top_k: int) -> RetrievalResult:
+        started = self._clock()
         key = self._doc_key(scenario_id)
         entries = self._index.get(key) or []
         text = (query or "").strip()
+        self._stats["searches"] += 1
+        model = self._embedder.model if self._embedder else ""
+        min_score = self._embedder.min_score if self._embedder else 0.0
+
         if not entries or not text:
-            return []
+            return self._result(scenario_id, key, text, "keyword", [], "", model,
+                                min_score, started)
 
         keyword = self._keyword_rank(frozenset(tokenize(text)), entries)
-        index = self._ensure_vector(key)
+        index, degraded = self._ensure_vector(key)
         if index is None:
-            return self._to_chunks(scenario_id, entries, keyword, top_k)
+            self._stats["degraded"] += 1
+            return self._result(scenario_id, key, text, "keyword",
+                                self._hits(entries, keyword, top_k), degraded, model,
+                                min_score, started)
 
         try:
             query_vector = self._embedder.embed([text])[0]
-        except EmbeddingError:
+        except EmbeddingError as exc:
             # 向量是增强项：端点抖动时静默回退关键词基线，别让"咨询"跟着失败
-            return self._to_chunks(scenario_id, entries, keyword, top_k)
+            self._stats["degraded"] += 1
+            return self._result(scenario_id, key, text, "keyword",
+                                self._hits(entries, keyword, top_k),
+                                "查询向量失败：" + (str(exc)[:100] or "未知错误"),
+                                model, min_score, started)
 
         vector = index.search(query_vector, max(1, int(top_k)) * VECTOR_CANDIDATES,
-                              min_score=self._embedder.min_score)
+                              min_score=min_score)
         if not vector:
-            return self._to_chunks(scenario_id, entries, keyword, top_k)
-        return self._to_chunks(scenario_id, entries, rrf_fuse([vector, keyword]), top_k)
+            self._stats["degraded"] += 1
+            return self._result(scenario_id, key, text, "keyword",
+                                self._hits(entries, keyword, top_k),
+                                "向量召回为空（相似度均低于 " + str(min_score) + "）",
+                                model, min_score, started)
+
+        self._stats["vector_used"] += 1
+        return self._result(scenario_id, key, text, "vector+keyword",
+                            self._fuse(entries, vector, keyword, top_k), "", model,
+                            min_score, started)
+
+    def _result(self, scenario_id: str, key: str, text: str, channel: str,
+                hits: List[_Hit], degraded: str, model: str, min_score: float,
+                started: float) -> RetrievalResult:
+        return RetrievalResult(
+            scenario_id=scenario_id, doc_key=key, query=text, channel=channel,
+            hits=hits, degraded=degraded, vector_model=model,
+            vector_min_score=min_score,
+            elapsed_ms=(self._clock() - started) * 1000.0,
+        )
+
+    @staticmethod
+    def _hits(entries: Sequence[_Entry], ranked: Sequence[Tuple[int, float]],
+              top_k: int) -> List[_Hit]:
+        """纯关键词路径的命中（分数即关键词分，标出来供 `explain()` 看）。"""
+        return [_Hit(index=index, entry=entries[index], score=score, keyword_score=score)
+                for index, score in ranked[:max(1, int(top_k))]]
+
+    @staticmethod
+    def _fuse(entries: Sequence[_Entry], vector: Sequence[Tuple[int, float]],
+              keyword: Sequence[Tuple[int, float]], top_k: int) -> List[_Hit]:
+        """RRF 融合两路召回，并**保留各路的原始分数**（可观测性靠它）。"""
+        vector_scores = dict(vector)
+        keyword_scores = dict(keyword)
+        hits: List[_Hit] = []
+        for index, score in rrf_fuse([vector, keyword])[:max(1, int(top_k))]:
+            hits.append(_Hit(
+                index=index, entry=entries[index], score=score,
+                vector_score=vector_scores.get(index),
+                keyword_score=keyword_scores.get(index),
+            ))
+        return hits
 
     def retrieve(self, scenario_id: str, query: str = "", top_k: int = 3) -> str:
         """检索并拼成文本；查询为空或没有命中时**兜底返回整篇指南**。"""
@@ -239,41 +376,41 @@ class KnowledgeBase:
         ranked.sort(key=lambda item: item[1], reverse=True)
         return ranked
 
-    @staticmethod
-    def _to_chunks(scenario_id: str, entries: Sequence[_Entry],
-                   ranked: Sequence[Tuple[int, float]], top_k: int) -> List[Chunk]:
-        """把 `[(下标, 分数)]` 还原成 `Chunk` 列表（截断到 top_k）。"""
-        chunks: List[Chunk] = []
-        for index, score in ranked[:max(1, int(top_k))]:
-            entry = entries[index]
-            chunks.append(Chunk(scenario_id=scenario_id, heading=entry.heading,
-                                text=entry.text, score=score))
-        return chunks
-
     # ---------- 内部：向量通道 ----------
 
-    def _ensure_vector(self, key: str) -> Optional[VectorIndex]:
-        """取（或构建）该场景的向量索引；未启用 / 构建失败时返回 None（走基线）。"""
-        if not key or self._embedder is None or not self._embedder.available:
-            return None
-        if key in self._vectors:
-            return self._vectors[key]
-        if key in self._vector_failed:
-            return None
+    def _ensure_vector(self, key: str) -> Tuple[Optional[VectorIndex], str]:
+        """取（或构建）该场景的向量索引，返回 `(索引或 None, 降级原因)`。
+
+        降级**不是永久的**：构建失败后进入冷却期，冷却结束会自动再试——
+        端点恢复后无需重启进程（旧实现一失败就永久走基线，恢复了也没人知道）。
+        """
+        if not key:
+            return None, "该场景没有指南"
+        if self._embedder is None or not self._embedder.available:
+            return None, "未配置向量模型（MOMA_EMBED_MODEL）"
+        ready = self._vectors.get(key)
+        if ready is not None:
+            return ready, ""
+        now = self._clock()
+        retry_at = self._vector_failed.get(key)
+        if retry_at is not None:
+            if now < retry_at:
+                return None, "向量构建失败，冷却中（约 " + str(int(retry_at - now)) + "s 后重试）"
+            self._vector_failed.pop(key, None)      # 冷却结束 -> 再试一次
         entries = self._index.get(key) or []
         if not entries:
-            return None
+            return None, "该场景没有可检索片段"
         try:
             vectors = self._build_vectors(key, entries)
-            index = VectorIndex(vectors) if vectors else None
-        except Exception:
-            index = None
-        if index is None:
-            # 端点不可用：本进程内不再重试，避免每次咨询都卡一次超时
-            self._vector_failed.add(key)
-            return None
+        except Exception as exc:
+            self._vector_failed[key] = now + self.vector_retry_cooldown
+            return None, "向量构建失败：" + (str(exc)[:100] or exc.__class__.__name__)
+        if not vectors:
+            self._vector_failed[key] = now + self.vector_retry_cooldown
+            return None, "向量构建结果为空"
+        index = VectorIndex(vectors)
         self._vectors[key] = index
-        return index
+        return index, ""
 
     def _build_vectors(self, key: str, entries: Sequence[_Entry]) -> List[List[float]]:
         """构建片段向量：优先读缓存（模型 / 文本指纹匹配），否则调端点并落盘。"""
@@ -282,8 +419,10 @@ class KnowledgeBase:
         cache_file = self._cache_dir / (key + ".json")
         cached = load_vectors(cache_file, self._embedder.model, stamp)
         if cached is not None:
+            self._stats["cache_hits"] += 1
             return cached
         vectors = self._embedder.embed(texts)
+        self._stats["embed_calls"] += 1
         save_vectors(cache_file, self._embedder.model, stamp, vectors)
         return vectors
 

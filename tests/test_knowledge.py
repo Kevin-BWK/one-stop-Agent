@@ -226,6 +226,60 @@ def test_consult_agent_survives_broken_knowledge():
     assert reply and "材料" in reply, reply
 
 
+# ---------- 检索 query 的上下文（省略句也能检索到，见 docs/11）----------
+
+def test_search_query_brings_recent_user_turns():
+    """把最近几轮**用户提问**拼进检索 query；助手的回答不掺进来。"""
+    from app.agents.consult_agent import ConsultAgent
+    from app.moma.client import MoMAClient
+    from app.moma.context import SessionContext
+
+    context = SessionContext()
+    context.add_history("user", "我想开一家牛肉面馆")
+    context.add_history("assistant", "好的，我来帮您办。")
+    agent = ConsultAgent(MoMAClient(api_base="", api_key=""), context)
+
+    query = agent._search_query("那要什么材料")
+    assert query == "我想开一家牛肉面馆 那要什么材料", query
+    assert "好的，我来帮您办" not in query, query      # 助手的回答不参与检索
+
+    # 只带最近几轮：更早的历史被挤掉，避免 query 越滚越长
+    for index in range(10):
+        context.add_history("user", "旧问题" + str(index))
+    query = agent._search_query("新问题")
+    assert query == "旧问题8 旧问题9 新问题", query
+
+
+def test_search_query_without_context_is_plain_question():
+    """没有历史时行为与接入前一致：检索 query 就是原问题。"""
+    from app.agents.consult_agent import ConsultAgent
+    from app.moma.client import MoMAClient
+    from app.moma.context import SessionContext
+
+    agent = ConsultAgent(MoMAClient(api_base="", api_key=""), SessionContext())
+    assert agent._search_query("需要什么材料") == "需要什么材料"
+    assert agent._search_query("") == ""
+    assert agent._search_query(None) == ""
+
+
+def test_omitted_question_retrieves_with_context():
+    """省略句（"那这个呢"）单看检索不到，靠上文才能命中——这就是带上下文的用处。"""
+    from app.agents.consult_agent import ConsultAgent
+    from app.moma.client import MoMAClient
+    from app.moma.context import SessionContext
+
+    scenario = _scenario("restaurant_open")
+
+    bare = ConsultAgent(MoMAClient(api_base="", api_key=""), SessionContext())
+    assert "油烟净化设施" not in bare.answer("那这个呢", scenario, KB)
+
+    context = SessionContext()
+    context.add_history("user", "油烟净化设施要装吗")
+    context.add_history("assistant", "经营热食需要安装。")
+    with_context = ConsultAgent(MoMAClient(api_base="", api_key=""), context)
+    assert "油烟净化设施" in with_context.answer("那这个呢", scenario, KB)
+
+
 if __name__ == "__main__":
     test_loads_both_guides()
     test_scenario_id_maps_to_guide()
@@ -246,4 +300,7 @@ if __name__ == "__main__":
     test_consult_agent_appends_guide_to_offline_reply()
     test_consult_agent_feeds_guide_into_model_messages()
     test_consult_agent_survives_broken_knowledge()
+    test_search_query_brings_recent_user_turns()
+    test_search_query_without_context_is_plain_question()
+    test_omitted_question_retrieves_with_context()
     print("KNOWLEDGE TESTS PASSED")

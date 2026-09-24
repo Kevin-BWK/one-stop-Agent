@@ -27,8 +27,9 @@ for _name in ("MOMA_EMBED_MODEL", "MOMA_EMBED_API_BASE", "MOMA_EMBED_API_KEY",
               "MOMA_EMBED_MIN_SCORE", "MOMA_DISABLE_LIVE"):
     os.environ.pop(_name, None)
 
-from app.knowledge.embedding import (EmbeddingClient, EmbeddingError, VectorIndex,
-                                     cosine, load_vectors, save_vectors)
+from app.knowledge.embedding import (DEFAULT_MIN_SCORE, EmbeddingClient, EmbeddingError,
+                                     VectorIndex, cosine, default_min_score, load_vectors,
+                                     save_vectors)
 from app.knowledge.retriever import KnowledgeBase, rrf_fuse
 from test_moma_client import FakeResponse, FakeSession
 
@@ -308,6 +309,115 @@ def test_consult_agent_uses_vector_knowledge():
     _with_cache(run)
 
 
+# ---------- 可观测性（explain / stats） ----------
+
+def test_explain_reports_channel_and_score_sources():
+    """explain() 要说清：走哪条通道、每个片段的分从哪来、有没有降级。"""
+    def run(tmp):
+        # 未配置向量 -> 纯关键词通道，且有明确降级原因
+        stub_kb = KnowledgeBase(DATA, embedder=_stub_client(), cache_dir=tmp)
+        offline = stub_kb.explain("restaurant_open", "油烟", top_k=1)
+        assert offline["channel"] == "keyword", offline
+        assert offline["degraded"], offline            # 为什么没走向量，说得出来
+        hit = offline["hits"][0]
+        assert "油烟净化设施" in hit["text"]
+        assert hit["keyword_score"] is not None and hit["vector_score"] is None
+        assert offline["elapsed_ms"] >= 0
+
+        # 启用向量 -> 两路融合：命中片段同时标出两路分数（缺哪路就是 None）
+        kb = KnowledgeBase(DATA, embedder=_live_client(FakeEmbeddingSession()), cache_dir=tmp)
+        live = kb.explain("restaurant_open", "排烟", top_k=1)
+        assert live["channel"] == "vector+keyword", live
+        assert live["degraded"] == ""
+        assert live["vector_model"] == "fake-emb"
+        hit = live["hits"][0]
+        assert "油烟净化设施" in hit["text"]
+        assert hit["vector_score"] is not None         # 向量分
+        assert hit["keyword_score"] is None            # "排烟"关键词抓不到 -> 没有关键词分
+        assert kb.explain("restaurant_open", "")["hits"] == []
+
+    _with_cache(run)
+
+
+def test_stats_counts_vector_usage_and_cache():
+    """stats() 让"向量到底有没有生效"不用猜。"""
+    def run(tmp):
+        stub_kb = KnowledgeBase(DATA, embedder=_stub_client(), cache_dir=tmp)
+        stub_kb.search("restaurant_open", "油烟")
+        stub_kb.search("restaurant_open", "材料")
+        stats = stub_kb.stats()
+        assert stats["searches"] == 2 and stats["degraded"] == 2
+        assert stats["vector_used"] == 0
+
+        kb = KnowledgeBase(DATA, embedder=_live_client(FakeEmbeddingSession()), cache_dir=tmp)
+        kb.search("restaurant_open", "油烟")
+        kb.search("restaurant_open", "材料")
+        stats = kb.stats()
+        assert stats["searches"] == 2 and stats["vector_used"] == 2
+        assert stats["degraded"] == 0
+        assert stats["embed_calls"] == 1               # 只有建索引那一次
+        assert stats["cache_hits"] == 0
+
+        # 换实例、同缓存目录 -> 索引来自磁盘缓存，不再调用端点
+        again = KnowledgeBase(DATA, embedder=_live_client(FakeEmbeddingSession()), cache_dir=tmp)
+        again.search("restaurant_open", "油烟")
+        assert again.stats()["cache_hits"] == 1
+        assert again.stats()["embed_calls"] == 0
+
+    _with_cache(run)
+
+
+def test_vector_recovers_after_cooldown():
+    """失败不是永久的：冷却结束后自动重试，端点恢复后无需重启进程。"""
+    def run(tmp):
+        session = FakeEmbeddingSession(fail_times=1)
+        kb = KnowledgeBase(DATA, embedder=_live_client(session, max_retries=0), cache_dir=tmp)
+        now = {"t": 1000.0}
+        kb._clock = lambda: now["t"]
+
+        # 第一次：构建失败 -> 降级，进入冷却
+        first = kb.explain("restaurant_open", "油烟", top_k=1)
+        assert first["channel"] == "keyword" and first["degraded"], first
+        calls = len(session.calls)
+        assert calls == 1, session.calls
+
+        # 冷却期内：不再尝试（避免每次咨询都卡一次超时）
+        kb.explain("restaurant_open", "油烟", top_k=1)
+        assert len(session.calls) == calls, session.calls
+
+        # 冷却结束：自动重试 -> 这次成功，向量通道恢复
+        now["t"] += kb.vector_retry_cooldown + 1
+        recovered = kb.explain("restaurant_open", "油烟", top_k=1)
+        assert recovered["channel"] == "vector+keyword", recovered
+        assert recovered["degraded"] == ""
+        assert len(session.calls) > calls, session.calls
+
+    _with_cache(run)
+
+
+def test_min_score_defaults_by_model():
+    """阈值随模型走：不同模型的余弦分布不同，共用一个硬编码值会砍光召回或放进噪声。"""
+    assert default_min_score("bge-large-zh") == 0.45
+    assert default_min_score("BAAI/bge-m3") == 0.45
+    assert default_min_score("text-embedding-3-small") == 0.30
+    assert default_min_score("unknown-model") == DEFAULT_MIN_SCORE
+    assert default_min_score(None) == DEFAULT_MIN_SCORE
+
+    bge = EmbeddingClient(api_base="https://x/v1", api_key="k",
+                          model="bge-large-zh", load_env=False)
+    assert bge.min_score == 0.45 and bge.min_score_source == "model-default"
+    assert bge.describe()["min_score_source"] == "model-default"
+
+    # 显式环境变量优先于模型默认值
+    os.environ["MOMA_EMBED_MIN_SCORE"] = "0.77"
+    try:
+        forced = EmbeddingClient(api_base="https://x/v1", api_key="k",
+                                 model="bge-large-zh", load_env=False)
+        assert forced.min_score == 0.77 and forced.min_score_source == "env"
+    finally:
+        os.environ.pop("MOMA_EMBED_MIN_SCORE", None)
+
+
 def main():
     test_cosine_basics()
     test_vector_index_orders_and_filters_by_threshold()
@@ -326,6 +436,10 @@ def main():
     test_vector_failure_degrades_to_baseline_without_retry_storm()
     test_unconfigured_kb_keeps_old_behavior()
     test_consult_agent_uses_vector_knowledge()
+    test_explain_reports_channel_and_score_sources()
+    test_stats_counts_vector_usage_and_cache()
+    test_vector_recovers_after_cooldown()
+    test_min_score_defaults_by_model()
     print("KNOWLEDGE VECTOR TESTS PASSED")
 
 

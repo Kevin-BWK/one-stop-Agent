@@ -98,8 +98,9 @@ python run_demo.py --query YJS0001
 
 # 冒烟测试（无需 pytest），按层组织
 python tests/test_condition_routing.py  # 规则层：条件判定矩阵（操作符 / 边界 / 组合 / 反向）
-python tests/test_knowledge.py          # 检索层：关键词基线（切分 / 打分 / 场景映射 / 兜底 / 咨询接线）
-python tests/test_knowledge_vector.py   # 检索层（向量）：Embedding 客户端 / 语义召回 / RRF 融合 / 缓存 / 降级（离线）
+python tests/test_knowledge.py          # 检索层：关键词基线（切分 / 打分 / 场景映射 / 兜底 / 咨询接线 / 检索带上下文）
+python tests/test_knowledge_vector.py   # 检索层（向量）：Embedding 客户端 / 语义召回 / RRF 融合 / 缓存 / 降级恢复 / 可观测（离线）
+python tests/test_knowledge_eval.py     # 检索层（评估）：12 条标注用例的 recall@1 / recall@k / MRR 回归门槛
 python tests/test_flow.py               # 编排层：MainAgent 闭环 + 流程节点 + 事件
 python tests/test_materials.py          # 材料层：清单 / 槽位 / 核验（含视觉核验与降级）/ 补正 / 撤回 / 受理拦截
 python tests/test_moma_client.py        # 模型层：MoMA 桩/真实、重试与降级（离线）
@@ -204,7 +205,7 @@ dev.bat -Stop               # 停止前后端
 | --- | --- |
 | `MOMA_EMBED_MODEL` | 向量模型名，**配了它才启用向量召回**（如 `bge-large-zh`） |
 | `MOMA_EMBED_API_BASE` / `MOMA_EMBED_API_KEY` | 向量端点与密钥，默认回退主角色配置 |
-| `MOMA_EMBED_MIN_SCORE` | 余弦相似度下限，低于它的召回丢弃，默认 `0.2` |
+| `MOMA_EMBED_MIN_SCORE` | 余弦相似度下限，低于它的召回丢弃；不配则按模型名取默认（BGE 0.45 / OpenAI 0.30） |
 
 未配置时检索走零依赖关键词基线，行为与之前完全一致；向量端点不可用会自动降级基线。
 
@@ -244,7 +245,7 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - 受理入口统一：表单式（`/apply`）与对话式（`/api/session` + `/api/chat` + `/api/fields`）两条路径**共用同一套 `MainAgent` 编排与材料提交**；多轮会话只负责采集与材料清单，不再自行受理（见 `docs/09`）。
 - 对话式办理：聊天区可输入、随时插问；提问走会话（`ensureSession()` + `/api/ask` 带 `session_id`），服务端按会话记住问答，最近 3 轮历史带进模型上下文（见 `docs/08`）。
 - 知识检索：咨询时按问题检索办事指南片段作为作答依据（两级切分 + 字符 2-gram + 标题加权，零依赖）；真实/离线两条路径都带依据，不传知识库时行为不变（见 `docs/11`）。
-- 向量化检索：关键词基线之外新增 Embedding 向量召回，两路 **RRF 融合**（语义相近即可命中，如问"排烟"能找到"油烟净化设施"）；配 `MOMA_EMBED_MODEL` 即启用，向量落盘缓存、端点不可用自动降级，**对外契约不变**（见 `docs/11`）。
+- 向量化检索：关键词基线之外新增 Embedding 向量召回，两路 **RRF 融合**（语义相近即可命中，如问"排烟"能找到"油烟净化设施"）；配 `MOMA_EMBED_MODEL` 即启用，向量落盘缓存、阈值按模型取默认、端点失败降级并**冷却后自动重试**；检索 query 带最近几轮用户提问（省略句不再跑偏），`explain()` / `stats()` 可观测，附 12 条标注用例的 **recall/MRR 回归门槛**，**对外契约不变**（见 `docs/11`）。
 - 文案自然语言化：结构化进度看板只进 CLI / 进度看板，**推给对话区的都是自然语言**；材料与事项一律用中文名，不出现 JSON 字面量、内部 id、模型名（见 `docs/08`）。
 - 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 uni-app 前端实时刷新进度预留。
 - 配置化条件路由：面积、油烟、生食/冷食、招牌、银行开户、用工人数等按规则增减事项与材料。
