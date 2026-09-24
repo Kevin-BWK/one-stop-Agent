@@ -137,6 +137,23 @@ def main():
     _, te = apply_and_submit(client, "enterprise_open", ENTERPRISE, "我想注册一家科技公司")
     assert "D_bank" in te["case"]["items"], te["case"]["items"]
 
+    # 条件判定实时预判：只读、无状态，按当前输入给出事项与材料
+    # （规则细节见 tests/test_condition_routing.py，这里只验接口契约）
+    base = client.post("/api/preview", json={"scenario_id": "restaurant_open", "answers": {}}).json()
+    assert base["items"], base
+    assert base["material_names"][0] == "法定代表人身份证", base    # id 已转成中文名
+
+    filled = client.post("/api/preview", json={
+        "scenario_id": "restaurant_open",
+        "answers": {"business_type": "热食/有油烟", "signboard": True}}).json()
+    assert filled["items"] != base["items"], filled                # 输入变了，预判就跟着变
+    # 中文输入要能正确落到规则上，并且 id 已映射成中文名
+    assert "油烟净化设施证明" in filled["material_names"], filled
+    assert "户外招牌设施设置" in filled["item_names"], filled
+    assert filled["notes"], filled                                 # 并说明为什么会多出这些
+
+    assert client.post("/api/preview", json={"scenario_id": "nope", "answers": {}}).status_code == 404
+
     # 异常分支
     assert client.post("/api/session", json={"scenario_id": "nope"}).status_code == 404
     assert client.post("/api/chat", json={"session_id": "nope", "message": "hi"}).status_code == 404

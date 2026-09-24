@@ -154,6 +154,7 @@ dev.bat -Stop               # 停止前后端
 - **进度是真实办理进度**：后端每完成一个节点 / 每收到一次部门子 Agent 回调，立即推一条事件，看板增量刷新——进度零延迟、无空转。
 - **动态表单**：表单区消费 `scenarios/*.json` 的 `collect_fields` 自动渲染控件，新增“一件事”不改前端。
 - **材料区**：清单、槽位与张数上限全部由后端下发（`GET /api/materials/{intake_id}`），前端只负责渲染与发起拍照 / 选文件；上传走 `uni.uploadFile`（multipart），材料齐备后才允许开始办理（见 `docs/09`）。
+- **实时预判**：填表过程中按当前已填字段预判"预计要办什么、交什么"（`POST /api/preview`，只读无副作用，前端 500ms 防抖）；字段采齐后才由 `POST /api/materials/intake` 产出**正式清单**，界面区分"预判"与"最终"（见 `docs/09`）。
 - **事件负载复用现有结构**：`flow_node` 取 `FlowProgress.snapshot()`，`item_done` 取部门回调结果，`case_created` / `finished` 取 `CaseRecord`。
 
 事件与前端处理的对应：

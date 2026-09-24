@@ -4,6 +4,7 @@ import {
   askQuestion,
   createIntake,
   fetchCase,
+  fetchPreview,
   fetchScenario,
   removeMaterialFile,
   uploadMaterialFile
@@ -12,6 +13,7 @@ import { subscribeApply } from '@/api/stream'
 import type {
   ChatMessage,
   CollectField,
+  ConditionPreview,
   FlowNode,
   MaterialItem,
   MaterialSummary,
@@ -76,6 +78,9 @@ export const useCaseStore = defineStore('case', {
     materialSummary: { total: 0, passed: 0, ready: false } as MaterialSummary,
     /** 正在上传/撤回的那一项（`materialId|slot`），用于禁用按钮 */
     materialBusy: '',
+    /** 条件判定实时预判（见 /api/preview）：按目前填了多少预估事项与材料 */
+    preview: null as ConditionPreview | null,
+    previewTimer: null as null | ReturnType<typeof setTimeout>,
     running: false,
     preparing: false,
     asking: false,
@@ -142,6 +147,11 @@ export const useCaseStore = defineStore('case', {
       this.materials = []
       this.materialSummary = { total: 0, passed: 0, ready: false }
       this.materialBusy = ''
+      this.preview = null
+      if (this.previewTimer) {
+        clearTimeout(this.previewTimer)
+        this.previewTimer = null
+      }
       this.resetProgress()
     },
 
@@ -167,6 +177,30 @@ export const useCaseStore = defineStore('case', {
 
     setAnswer(key: string, value: any) {
       this.answers[key] = value
+      this.schedulePreview()
+    },
+
+    /** 字段改动后延迟刷新预判（防抖，避免每敲一个字就请求一次） */
+    schedulePreview() {
+      if (this.previewTimer) {
+        clearTimeout(this.previewTimer)
+      }
+      this.previewTimer = setTimeout(() => {
+        this.previewTimer = null
+        this.refreshPreview()
+      }, 500)
+    },
+
+    /** 拉一次条件判定预判（只读、无副作用；失败静默保留上一次，不打扰用户） */
+    async refreshPreview() {
+      if (!this.scenario) {
+        return
+      }
+      try {
+        this.preview = await fetchPreview(this.scenarioId, this.answers)
+      } catch (e) {
+        // 预判只是辅助信息，失败不该弹错
+      }
     },
 
     /** 把用户填写的表单转成一句自然语言（既是"我说的话"，也作为意图识别输入） */
@@ -207,6 +241,8 @@ export const useCaseStore = defineStore('case', {
         const view = await createIntake(this.scenarioId, this.answers)
         this.pushMessage('你', utterance)
         this.applyMaterialView(view)
+        // 信息已采齐：让预判与正式清单对齐
+        await this.refreshPreview()
         if (view.message) {
           this.pushMessage('材料Agent', view.message)
         }
@@ -397,6 +433,7 @@ export const useCaseStore = defineStore('case', {
         this.intakeId = ''
         this.materials = []
         this.materialSummary = { total: 0, passed: 0, ready: false }
+        this.preview = null
         if (Array.isArray(found.flow)) {
           this.nodes = found.flow
         }

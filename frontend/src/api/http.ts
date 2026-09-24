@@ -1,4 +1,4 @@
-import type { MaterialView, Scenario } from '@/types/contract'
+import type { ConditionPreview, MaterialView, Scenario } from '@/types/contract'
 
 /**
  * 后端地址前缀。H5 调试端走 vite 代理，留空用相对路径即可；
@@ -69,6 +69,26 @@ export async function askQuestion(scenarioId: string, question: string): Promise
     throw new Error('咨询失败（' + res.status + '）')
   }
   return (await res.json()) as AskResult
+}
+
+/**
+ * 条件判定实时预判：按当前（可能还不完整的）表单预估事项与材料。
+ *
+ * 只读、无状态——不建材料收集单、不落库，所以可以随便调（前端做了防抖）。
+ */
+export async function fetchPreview(
+  scenarioId: string,
+  answers: Record<string, any>
+): Promise<ConditionPreview> {
+  const res = await fetch(API_BASE + '/api/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scenario_id: scenarioId, answers })
+  })
+  if (!res.ok) {
+    throw new Error(await errorText(res, '预判失败'))
+  }
+  return (await res.json()) as ConditionPreview
 }
 
 // ---------- 材料提交（受理前，见 docs/09）----------

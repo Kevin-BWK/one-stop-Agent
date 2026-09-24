@@ -87,6 +87,9 @@ def main():
         assert t.get("case") is None, "字段采齐后不该直接受理"
         assert "D_signboard" in t["items"], t["items"]      # 正向：设了招牌
         assert "C_fire" not in t["items"], t["items"]       # 反向：80 平米
+        # 实时预判：采齐后应与正式清单一致（同一套纯函数算出来的）
+        assert t["preview"]["items"] == t["items"], t["preview"]
+        assert t["preview"]["materials"] == t["materials"], t["preview"]
 
         view = t["material_view"]
         names = [m["name"] for m in view["materials"]]

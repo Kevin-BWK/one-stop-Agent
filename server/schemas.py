@@ -40,6 +40,15 @@ class IntakeRequest(BaseModel):
     answers: Dict[str, Any] = {}
 
 
+class PreviewRequest(BaseModel):
+    """填写过程中请求条件判定预判。
+
+    只读、无状态：不建材料收集单、不落库，纯粹是"按目前填了多少先算一遍"。
+    """
+    scenario_id: str
+    answers: Dict[str, Any] = {}
+
+
 class AskRequest(BaseModel):
     """对话区提问（咨询意图）。"""
     scenario_id: str
@@ -83,6 +92,8 @@ class TurnResponse(BaseModel):
     items: List[str] = []
     # 材料 id 列表（结构化；给界面展示请用 material_view）
     materials: List[str] = []
+    # 按当前已填字段的实时预判（只读；字段采齐后与正式清单一致）
+    preview: Optional[dict] = None
     # 字段采齐后产出：材料收集单号 + 材料区渲染数据
     intake_id: str = ""
     material_view: Optional[dict] = None

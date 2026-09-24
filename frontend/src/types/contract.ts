@@ -76,6 +76,21 @@ export interface CollectField {
   required?: boolean
 }
 
+/**
+ * 条件判定实时预判（POST /api/preview）。
+ *
+ * 按**目前填了多少**预估要办的事与要交的材料；只读、无副作用。
+ * 信息采齐后会产出正式清单（`intake_id`），此时两者一致。
+ */
+export interface ConditionPreview {
+  items: string[]
+  item_names: string[]
+  materials: string[]
+  material_names: string[]
+  /** 命中条件规则的说明（为什么多出这几项） */
+  notes: string[]
+}
+
 /** 用户已提交的单个文件（材料区渲染缩略图用） */
 export interface MaterialFile {
   file_id: string

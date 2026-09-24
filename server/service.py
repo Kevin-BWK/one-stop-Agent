@@ -29,6 +29,7 @@ from app.moma.client import MoMAClient
 from app.moma.context import SessionContext
 from app.mock_gov.services import MockGovServices
 from app.models.schema import ApplicationForm, CaseRecord, MaterialIntake
+from app.orchestrator.preview import build_preview
 from app.orchestrator.router import route_intent
 from app.storage.repo import InMemoryRepo
 
@@ -225,6 +226,9 @@ class AgentService:
             "next_question": self._next_question(rec),
             "items": rec.context.get("items", []),
             "materials": rec.context.get("materials", []),
+            # 实时预判：按"目前填了多少"预估事项与材料，只读、无副作用。
+            # 已产出材料清单（intake_id 非空）时它与正式清单一致。
+            "preview": build_preview(rec.scenario, rec.form.fields),
             "intake_id": rec.intake.intake_id if rec.intake else "",
             "material_view": self.materials.view(rec.scenario, rec.intake) if rec.intake else None,
             "case": self._case_dict(rec.case),

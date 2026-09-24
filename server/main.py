@@ -10,9 +10,11 @@ import json
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
+from app.orchestrator.preview import build_preview
+
 from .materials import build_router
 from .schemas import (ApplyRequest, AskRequest, FieldSubmitRequest,
-                      MessageRequest, SessionCreateRequest)
+                      MessageRequest, PreviewRequest, SessionCreateRequest)
 from .service import AgentService
 from .stream import (answer_question, iter_events, load_case, load_intake,
                      load_scenario, material_gate, missing_required, sse_stream)
@@ -99,6 +101,17 @@ def create_app() -> FastAPI:
         if scenario is None:
             raise HTTPException(status_code=404, detail="场景不存在")
         return scenario
+
+    @app.post("/api/preview")
+    def preview(req: PreviewRequest):
+        """条件判定实时预判：按当前（可能还不完整的）表单预估事项与材料。
+
+        只读、无状态：不建材料收集单、不落库，纯函数求值，可任意频率调用。
+        """
+        scenario = load_scenario(req.scenario_id)
+        if scenario is None:
+            raise HTTPException(status_code=404, detail="场景不存在")
+        return build_preview(scenario, req.answers)
 
     @app.post("/api/ask")
     def ask(req: AskRequest):
