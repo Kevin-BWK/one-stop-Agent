@@ -262,7 +262,7 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] FastAPI 服务层 + 多轮会话改造
 - [x] MoMA 真实 API 接入
 - [x] 前端 H5 调试端（uni-app：Vue 3 + TypeScript，协作 · 以 Anjie 为主）
-- [ ] 前端 App 成品端打包（WebSocket 通道 + 权限声明已就绪；剩**依赖冲突 + `appid`**，见 `docs/10`，协作 · 以 Anjie 为主）
+- [ ] 前端 App 成品端打包（代码适配与依赖冲突均已解决，`npm run build:app` 可出产物；剩**填 `appid`** 与 HBuilderX 真机打包，见 `docs/10`，协作 · 以 Anjie 为主）
 
 #### Anjie（组员）· 场景与业务
 
@@ -274,7 +274,7 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] 进度状态推进（流程节点打勾 + 部门子 Agent 办结回调 + 编排事件出口）
 - [x] 材料提交与核验（材料清单 / 逐项上传与核验 / 补正闭环 / 受理前置校验，见 `docs/09`）
 - [x] 前端 H5 调试端（uni-app，Vue 3 + TypeScript，主负责 · Kevin 协作）
-- [ ] 前端 App 成品端打包（WebSocket 通道 + 权限声明已就绪；剩**依赖冲突 + `appid`**，见 `docs/10`，主负责 · Kevin 协作）
+- [ ] 前端 App 成品端打包（代码适配与依赖冲突均已解决，`npm run build:app` 可出产物；剩**填 `appid`** 与 HBuilderX 真机打包，见 `docs/10`，主负责 · Kevin 协作）
 - [x] 知识检索基线（按问题检索指南片段，见 `docs/11`）
 - [ ] 向量化检索（Embedding + 向量库 + 重排，见 `docs/11`）
 - [x] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
@@ -284,7 +284,7 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] 双场景骨架 + 完整编排闭环 + 条件路由
 - [x] 进度状态推进（让“办理进度”可变化）
 - [x] uni-app 前端 H5 调试端（聊天 + 动态表单 + 材料区 + 进度看板，SSE 事件推送，见「前端交互设计」）
-- [ ] uni-app App 成品端打包（**前端适配已完成**：`uni.request` 跨端 + 可配绝对基址 + 条件编译选通道 + 权限声明；**卡在 vue / @vue/shared 版本冲突**与 `appid`，见 `docs/10-App打包前检查清单.md`）
+- [ ] uni-app App 成品端打包（**前端适配与依赖冲突均已解决**：`uni.request` 跨端 + 可配绝对基址 + 条件编译选通道 + 权限声明 + `@vue/shared` override；`npm run build:app` 可出产物，剩**填 `appid`** 与 HBuilderX 真机打包，见 `docs/10-App打包前检查清单.md`）
 - [x] 对话式办理（聊天区可输入、随时插问；提问走会话带多轮上下文，见 `docs/08`）
 - [x] 材料提交与核验（材料清单 + 逐项上传核验 + 补正闭环 + 受理前置校验，见 `docs/09`）
 - [x] 提交前置校验 + 文案自然语言化（去 JSON 字面量与内部 id；结构化看板只进 CLI，对话区只收自然语言，见 `docs/08`）

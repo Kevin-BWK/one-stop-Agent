@@ -1,10 +1,10 @@
 # 10 App 打包前检查清单
 
-> 状态：**H5 调试端已完成；App 端代码适配已完成（第 1/2/3/6 条）；App 仍不能打包**。
-> 剩余：**依赖冲突（第 0 条）** 未解决；`appid` 待填；真机打包需 HBuilderX。
+> 状态：**H5 调试端已完成；App 端代码适配与依赖冲突都已解决，`npm run build:app` 可产出可导入 HBuilderX 的产物**。
+> 剩余：`appid` 待填；真机打包需 HBuilderX；第 4/5 条是多用户上线前的事。
 > 本文记录打包前必须处理的衔接问题（按严重程度排序），每条都给了代码位置与修法。
 
-## 0. 依赖冲突：App 构建直接失败（当前唯一硬阻塞）
+## 0. 依赖冲突：App 构建直接失败 ✅ 已解决
 
 **现象**：`npm run build:app` 报
 `"normalizeCssVarValue" is not exported by "@vue/shared"`。
@@ -27,23 +27,31 @@
 `"isInSSRComponentSetup" is not exported by "vue"` —— 这版 `@dcloudio/uni-app` 是**按 vue 3.5 构建的**
 （`isInSSRComponentSetup` 在 3.4.21 里不存在）。**要对齐的是 `@vue/shared`，不是 `vue`。**
 
-**修法**（二选一）：
+**已做**（`frontend/package.json`）：
 
-- **A（推荐，改动小）**：把 `@vue/shared` 顶到与 `vue` 同版本
+- 把 `@vue/shared` 顶到与 `vue` 同版本：`"overrides": { "@vue/shared": "$vue" }`；
+- 把 `vue` / `@vue/runtime-core` 从 `^3.4.21` 改成**确切版本 `3.5.43`**——继续用 `^` 会再次漂移，
+  而 `$vue` 依赖确切版本才能把两者锁死；
+- 补装 `@dcloudio/uni-app-plus@3.0.0-5020620260917001`（App 平台插件，此前缺失）；
+- 删掉 `package-lock.json` 重建——旧 lockfile 已把这个不匹配固化了，增量 install 解不开。
 
-  ```json
-  "overrides": { "@vue/shared": "$vue" }
-  ```
+**已验证**：`vue-tsc` 零错误；H5 构建成功（`dist/build/h5/`）；**App 构建成功**
+（`dist/build/app/`，日志提示 `open HBuilderX, import dist\build\app run`）；产出的
+`manifest.json` 里能看到第 6 条声明的全部权限；`VITE_API_BASE` 确实注入进了 `app-service.js`。
 
-  同时把 `vue` / `@vue/runtime-core` 钉成**确切版本**（继续用 `^` 会再次漂移）。
-  注意 lockfile 已把这个不匹配固化了，需删掉 `package-lock.json` 重装才解得开。
-- **B（更彻底）**：把整套 `@dcloudio/*` 升到支持 vue 3.5 的版本，再统一 `vue` / `@vue/shared`。
+**为什么不选"升级整套 `@dcloudio`"**：查了更新一版的 `@dcloudio/uni-h5`（`vue3` tag，
+`3.0.0-alpha-5020720260921001`，比在用版本新），它**仍然声明 `@vue/shared: 3.4.21`**——
+所以升级并不能修掉这个问题，照样要配 `overrides`，等于"多做一遍工具链换代、收益为零"。
+升 uni 组件应作为独立的工具链升级事项来做，不要和这个 bug 绑在一起。
 
-> 这两条不是纯技术选择（A 是"覆盖 uni 声明的版本"，B 是"整体升级 uni 组件"），
-> 属于**团队的依赖策略**，建议与前端负责人确认后再动。
+> `overrides` 属于**覆盖官方声明的版本**（uni 声明的是 3.4.21），是官方未验证的组合。
+> 目前只用到 `@vue/shared` 里长期稳定的工具函数（`hasOwn` / `capitalize` / `extend` 等），
+> 风险可控；若将来 uni 把声明改到 3.5，应尽早去掉这个 override。
 
-**另一个待确认项**：`@dcloudio/uni-app-plus` **尚未安装**。修完上面的冲突后若 App 构建仍失败，
-多半还差它（App 平台插件）。
+**一个已知副作用**：重建 lockfile 后有 **7 条 `resolved` 指向 `registry.npmjs.org`**
+（`@dcloudio/uni-app-plus` 及其依赖、`@vue/shared`、`@vue/consolidate`、`licia`），
+其余 502 条指向 `registry.npmmirror.com`。原因是**镜像上还没有那几个最新版本**，
+npm 自动回退到官方源（实测可成功安装）。若队友环境只能访问镜像，需留意这 7 个包。
 
 ## 1. `fetch` 用了相对路径，App 端必挂 ✅ 已解决
 
@@ -130,5 +138,5 @@ README 的"桩实现 → 真实接入"表里已经许了这件事，这里是它
 | 阶段 | 要解决 | 工作量 |
 | --- | --- | --- |
 | 现在（H5 调试） | 无 | 0 |
-| **第一次真机跑 App** | **0（依赖冲突）**、填 `appid`、明文 HTTP 策略 | 半天以内（第 1/2/3/6 条已完成） |
+| **第一次真机跑 App** | 填 `appid`、明文 HTTP 策略 | 第 0/1/2/3/6 条**已完成**，`npm run build:app` 已能产出产物 |
 | **给多个真实用户用** | 4、5 | 大改（Redis + 数据库 + 鉴权） |
