@@ -8,7 +8,24 @@
   "app-plus": {
     "usingComponents": true,
     "nvueStyleCompiler": "uni-app",
-    "compilerVersion": 3
+    "compilerVersion": 3,
+    "distribute": {
+      "android": {
+        "permissions": [
+          "<uses-permission android:name=\"android.permission.INTERNET\"/>",
+          "<uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\"/>",
+          "<uses-permission android:name=\"android.permission.CAMERA\"/>",
+          "<uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>",
+          "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/>"
+        ]
+      },
+      "ios": {
+        "privacyDescription": {
+          "NSCameraUsageDescription": "拍摄身份证、证明材料等办事材料",
+          "NSPhotoLibraryUsageDescription": "从相册选择已拍好的办事材料"
+        }
+      }
+    }
   },
   "h5": {
     "title": "一件事·一次办",
