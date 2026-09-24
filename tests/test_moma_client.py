@@ -147,6 +147,28 @@ def test_consult_agent_wiring():
     assert sent[0]["role"] == "system" and "开办餐饮店" in sent[0]["content"]
 
 
+def test_complete_accepts_multimodal_content():
+    """多模态消息（content 为数组：文本 + 图片）要能发出、能解析——材料视觉核验依赖它。"""
+    messages = [
+        {"role": "system", "content": "你是材料审核助手"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "这是身份证正面吗"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}},
+        ]},
+    ]
+
+    session = FakeSession([ok("看了")])
+    client = MoMAClient(api_base="https://x/v1", api_key="k", session=session, sleep=no_sleep)
+    assert client.complete("qwen-vl", messages, fallback="FB") == "看了"
+    sent = session.calls[0]["json"]["messages"]
+    assert isinstance(sent[1]["content"], list), sent          # 原样发出去，没有被压平
+
+    # 桩模式：不给 fallback 时走 _stub，多模态的数组 content 不能让它崩
+    stub = MoMAClient(api_base="", api_key="")
+    assert stub.complete("qwen-vl", messages, fallback="FB") == "FB"
+    assert stub.complete("qwen-vl", messages) == "[qwen-vl] 这是身份证正面吗"
+
+
 def test_consult_agent_multi_turn_context():
     """多轮上下文：本会话之前的问答要进入发给模型的消息（见 docs/08）。"""
     context = SessionContext()
@@ -199,6 +221,7 @@ def main():
     test_4xx_no_retry_and_fallback()
     test_bad_json_raises()
     test_model_env_override()
+    test_complete_accepts_multimodal_content()
     test_consult_agent_wiring()
     test_consult_agent_multi_turn_context()
     test_consult_agent_history_is_capped()

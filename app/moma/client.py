@@ -220,8 +220,14 @@ class MoMAClient:
 
     # ---------- 内部实现 ----------
     @staticmethod
-    def _stub(model: str, messages: List[Dict[str, str]]) -> str:
+    def _stub(model: str, messages: List[Dict[str, Any]]) -> str:
         last = messages[-1]["content"] if messages else ""
+        if not isinstance(last, str):
+            # 多模态消息的 content 是数组（文本 + 图片），压成一行文本摘要
+            last = " ".join(
+                part.get("text", "") for part in last
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
         return "[" + model + "] " + last
 
     def _chat_live(

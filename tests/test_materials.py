@@ -5,6 +5,7 @@
 import atexit
 import itertools
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -13,6 +14,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
+
+# 测试离线运行：避免本机配了 .env 时材料核验去调真实多模态模型
+os.environ.setdefault("MOMA_DISABLE_LIVE", "1")
 
 from app.knowledge.retriever import KnowledgeBase
 from app.materials.service import MaterialService
@@ -285,6 +289,194 @@ def test_resume_rejects_incomplete_materials():
         assert "还没交齐" in str(exc)
 
 
+# ---------- 内容核验：桩规则 vs 视觉模型（见 app/materials/verify.py）----------
+
+def _vision(replies, max_retries=0):
+    """造一个"接了多模态模型"的核验器，用 FakeSession 喂预设回复，不联网。"""
+    from app.materials.verify import VisionChecker
+    from test_moma_client import FakeSession, no_sleep
+
+    session = FakeSession(list(replies))
+    moma = MoMAClient(api_base="https://x/v1", api_key="k", session=session,
+                      sleep=no_sleep, max_retries=max_retries)
+    return VisionChecker(moma, model="qwen-vl"), session
+
+
+def _vision_reply(payload):
+    from test_moma_client import ok
+    return ok(payload)
+
+
+def _id_card_spec():
+    return {"id": "id_card", "name": "法定代表人身份证", "reason": "证明申请人身份的真实性",
+            "accept": ["jpg", "jpeg", "png", "pdf"]}
+
+
+def test_parse_verdict_tolerates_model_noise():
+    """模型常把 JSON 包在代码块或解释文字里；解析不出来就返回 None（调用方据此回落）。"""
+    from app.materials.verify import parse_verdict
+
+    assert parse_verdict('{"ok": true, "reason": "清晰完整"}') == {"ok": True, "reason": "清晰完整"}
+    assert parse_verdict('```json\n{"ok": false, "reason": "看不清"}\n```') == {
+        "ok": False, "reason": "看不清"}
+    assert parse_verdict('判断结果：{"ok": true} 以上。')["ok"] is True
+    assert parse_verdict('{"ok": "true"}')["ok"] is True      # 布尔被写成字符串
+    assert parse_verdict('{"ok": false}')["ok"] is False
+    assert parse_verdict('{"ok": true}')["reason"] == ""
+
+    for broken in ("", None, "没有 JSON", '{"reason": "缺 ok 字段"}', "{不是合法 JSON}", "[1, 2]"):
+        assert parse_verdict(broken) is None, broken
+
+
+def test_vision_checker_passes_clean_photo():
+    """模型判合规 -> 通过，且真的发出了一次多模态请求。"""
+    checker, session = _vision([_vision_reply('{"ok": true, "reason": "身份证正面清晰完整"}')])
+    verdict = checker.check(_id_card_spec(), "front.jpg", _jpg(), slot="正面")
+
+    assert verdict["result"] == "通过" and verdict["status"] == "已通过", verdict
+    assert verdict["reason"] == ""
+    assert len(session.calls) == 1, session.calls
+
+
+def test_vision_messages_carry_text_and_image():
+    """多模态消息形状：system + user（content 为数组，含文本与图片 data URL）。"""
+    checker, session = _vision([_vision_reply('{"ok": true}')])
+    checker.check(_id_card_spec(), "front.jpg", _jpg(), slot="正面")
+
+    messages = session.calls[0]["json"]["messages"]
+    assert messages[0]["role"] == "system"
+    user = messages[1]
+    assert user["role"] == "user" and isinstance(user["content"], list), user
+
+    parts = [part["type"] for part in user["content"]]
+    assert parts == ["text", "image_url"], parts
+    ask = user["content"][0]["text"]
+    assert "法定代表人身份证" in ask and "正面" in ask, ask
+    assert "证明申请人身份的真实性" in ask, ask          # 用途也带上，模型判断才有依据
+    image = user["content"][1]["image_url"]["url"]
+    assert image.startswith("data:image/jpeg;base64,"), image[:48]
+
+
+def test_vision_checker_flags_wrong_document():
+    """模型判"不是这份材料" -> 需补正（不是拒收），原因是人话且转达模型给的理由。"""
+    checker, _ = _vision([_vision_reply('{"ok": false, "reason": "这是一张猫的照片"}')])
+    verdict = checker.check(_id_card_spec(), "front.jpg", _jpg(), slot="正面")
+
+    assert verdict["result"] == "需补正" and verdict["status"] == "需补正", verdict
+    assert "法定代表人身份证" in verdict["reason"], verdict
+    assert "正面" in verdict["reason"], verdict
+    assert "猫" in verdict["reason"], verdict            # 模型的理由要转达给用户
+    assert "qwen" not in verdict["reason"].lower(), verdict   # 但不暴露模型名（docs/08）
+
+
+def test_vision_checker_skips_non_image_and_huge_file():
+    """非图片、超大图不送模型（省带宽），但核验照常完成。"""
+    from app.materials.verify import VISION_MAX_BYTES
+
+    checker, session = _vision([])      # 不给回复：一旦真的调模型就会露馅
+    spec = {"id": "articles", "name": "公司章程", "accept": ["pdf", "jpg"]}
+
+    # PDF 没有视觉信息 -> 桩规则
+    assert checker.check(spec, "articles.pdf", b"%PDF-1.4" + b"\x00" * 20000)["result"] == "通过"
+    # 超过送模型上限 -> 桩规则
+    huge = _jpg(VISION_MAX_BYTES + 1024)
+    assert checker.check(spec, "big.jpg", huge)["result"] == "通过"
+    assert session.calls == [], session.calls
+
+
+def test_vision_checker_falls_back_when_model_unavailable():
+    """模型故障 / 返回乱码 / 没开模型 —— 一律回落桩规则，不能卡住办事。"""
+    from app.materials.verify import VisionChecker
+    spec = {"id": "premises", "name": "经营场所证明"}
+
+    # 网络异常
+    checker, _ = _vision([ConnectionError("net")])
+    assert checker.check(spec, "p.jpg", _jpg())["result"] == "通过"
+
+    # 返回无法解析的内容
+    checker, _ = _vision([_vision_reply("我看不出来是什么")])
+    assert checker.check(spec, "p.jpg", _jpg())["result"] == "通过"
+
+    # 没开模型（桩模式）：complete 拿到空 fallback -> 解析失败 -> 回落
+    checker = VisionChecker(MoMAClient(api_base="", api_key=""), model="qwen-vl")
+    assert checker.check(spec, "p.jpg", _jpg())["result"] == "通过"
+
+    # 回落之后，"图片过小 -> 需补正"的闭环仍然有效
+    assert checker.check(spec, "p.jpg", _tiny_jpg())["result"] == "需补正"
+
+
+def test_build_checker_selects_by_live_model():
+    """没配模型就给桩核验器——省掉"先把整张图 base64、再发现走不通"的浪费。"""
+    from app.materials.verify import (StubChecker, VisionChecker, build_checker)
+    from test_moma_client import FakeSession, no_sleep
+
+    assert isinstance(build_checker(None), StubChecker)
+    assert isinstance(build_checker(MoMAClient(api_base="", api_key="")), StubChecker)
+
+    live = MoMAClient(api_base="https://x/v1", api_key="k", session=FakeSession([]),
+                      sleep=no_sleep)
+    checker = build_checker(live, model="qwen-vl")
+    assert isinstance(checker, VisionChecker) and checker.model == "qwen-vl"
+
+
+def test_form_check_runs_before_model():
+    """形式校验优先：格式不对直接拒收，不该浪费一次模型调用。"""
+    from app.materials.verify import check_file
+
+    checker, session = _vision([_vision_reply('{"ok": true}')])
+    verdict = check_file(_id_card_spec(), "id_card.exe", _jpg(), checker=checker)
+
+    assert verdict["result"] == "不通过", verdict
+    assert session.calls == [], session.calls
+
+
+def test_service_and_agent_actually_use_the_checker():
+    """接线：MaterialService 与 VerifyAgent 都要把核验器与槽位真的用上。
+
+    （本项目出过两次"写好了没人调"：SessionContext.history() 与 KnowledgeBase.retrieve()，
+    所以这条测试专门盯接线。）
+    """
+    from app.agents.verify_agent import VerifyAgent
+    from app.materials.verify import StubChecker, VisionChecker
+    from test_moma_client import FakeSession, no_sleep
+
+    # 1) MaterialService：把核验器与槽位传下去
+    seen = []
+
+    class SpyChecker:
+        def check(self, spec, filename, content, slot=""):
+            seen.append((spec["id"], slot))
+            return {"result": "通过", "status": "已通过", "reason": ""}
+
+    slot_no = next(_SEQ)
+    service = MaterialService(
+        store=MaterialStore(
+            intakes_file=TMP / ("spy" + str(slot_no)) / "intakes.json",
+            materials_dir=TMP / ("spy" + str(slot_no)) / "materials",
+        ),
+        checker=SpyChecker(),
+    )
+    scenario = _scenario("restaurant_open")
+    intake = service.plan(scenario, RESTAURANT_ANSWERS)
+    service.upload(scenario, intake, "id_card", "front.jpg", "image/jpeg", _jpg(), slot="正面")
+    assert seen == [("id_card", "正面")], seen
+
+    # 2) VerifyAgent：材料核验走子 Agent 端点；配了模型就装视觉核验器
+    assert VerifyAgent.role == "sub"
+    stub_agent = VerifyAgent(MoMAClient(api_base="", api_key=""), SessionContext())
+    assert isinstance(stub_agent.checker, StubChecker)
+
+    session = FakeSession([_vision_reply('{"ok": true}')])
+    agent = VerifyAgent(
+        MoMAClient(api_base="https://x/v1", api_key="k", session=session, sleep=no_sleep),
+        SessionContext(),
+    )
+    assert isinstance(agent.checker, VisionChecker)
+    verdict = agent.check_file(_id_card_spec(), "front.jpg", _jpg(), slot="正面")
+    assert verdict["result"] == "通过", verdict
+    assert len(session.calls) == 1, session.calls
+
+
 if __name__ == "__main__":
     test_plan_follows_condition_rules()
     test_upload_enforces_slots_and_count()
@@ -296,4 +488,13 @@ if __name__ == "__main__":
     test_material_gate_blocks_until_ready()
     test_resume_from_materials_produces_case()
     test_resume_rejects_incomplete_materials()
+    test_parse_verdict_tolerates_model_noise()
+    test_vision_checker_passes_clean_photo()
+    test_vision_messages_carry_text_and_image()
+    test_vision_checker_flags_wrong_document()
+    test_vision_checker_skips_non_image_and_huge_file()
+    test_vision_checker_falls_back_when_model_unavailable()
+    test_build_checker_selects_by_live_model()
+    test_form_check_runs_before_model()
+    test_service_and_agent_actually_use_the_checker()
     print("ALL MATERIALS TESTS PASSED")

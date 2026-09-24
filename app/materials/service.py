@@ -12,15 +12,18 @@ from ..moma.context import SessionContext
 from ..models.schema import MaterialIntake
 from . import spec as spec_rule
 from .store import MaterialStore
-from .verify import check_file
+from .verify import build_checker, check_file
 
 
 class MaterialService:
     """材料清单、上传、撤回的统一入口（HTTP 层与编排层共用）。"""
 
-    def __init__(self, store: Optional[MaterialStore] = None, moma=None):
+    def __init__(self, store: Optional[MaterialStore] = None, moma=None, checker=None):
         self.store = store or MaterialStore()
         self.moma = moma or MoMAClient()
+        # 内容核验器：配了多模态模型就走视觉核验，否则用桩规则（见 app/materials/verify.py）
+        self.checker = checker or build_checker(
+            self.moma, model=self.moma.dispatch("verify"), role="sub")
 
     # ---------- 材料清单 ----------
 
@@ -98,7 +101,7 @@ class MaterialService:
         if reason:
             raise ValueError(reason)
 
-        verdict = check_file(spec, filename, content)
+        verdict = check_file(spec, filename, content, slot=slot, checker=self.checker)
         if verdict["result"] == "不通过":
             raise ValueError(verdict["reason"])
 
