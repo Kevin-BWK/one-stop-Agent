@@ -9,6 +9,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,6 +60,22 @@ def _jpg(size=20 * 1024) -> bytes:
 def _tiny_jpg() -> bytes:
     """造一张过小的图片（触发"需补正"）。"""
     return b"\xff\xd8\xff\xe0" + b"\x00" * 512
+
+
+def _png(width, height, size=20 * 1024) -> bytes:
+    """造一张"真 PNG 头"的图：体积够大，但分辨率可以很低。"""
+    header = (b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR"
+              + width.to_bytes(4, "big") + height.to_bytes(4, "big"))
+    return header + b"\x00" * (size - len(header))
+
+
+def _jpeg(width, height, size=20 * 1024) -> bytes:
+    """造一张"真 JPEG 头"（含 SOF0 尺寸段）的图。"""
+    sof = (b"\xff\xc0" + (17).to_bytes(2, "big") + b"\x08"
+           + height.to_bytes(2, "big") + width.to_bytes(2, "big")
+           + b"\x03" + b"\x01\x11\x00" + b"\x02\x11\x00" + b"\x03\x11\x00")
+    body = b"\xff\xd8\xff\xe0" + (16).to_bytes(2, "big") + b"\x00" * 14 + sof
+    return body + b"\x00" * (size - len(body))
 
 
 def _fill_all(service, scenario, intake):
@@ -446,6 +464,55 @@ def test_vision_checker_skips_non_image_and_huge_file():
     assert session.calls == [], session.calls
 
 
+def test_image_size_reads_jpeg_and_png_headers():
+    """零依赖读像素尺寸；读不出就返回 None（调用方据此不做分辨率判断）。"""
+    from app.materials.verify import image_size
+
+    assert image_size(_png(1080, 1920)) == (1080, 1920)
+    assert image_size(_jpeg(1600, 1200)) == (1600, 1200)
+
+    # 读不出的情况：宁可少判一条，也不能把好图误判成"看不清"
+    assert image_size(b"not an image") is None
+    assert image_size(b"\x89PNG\r\n\x1a\n") is None     # 头不全
+    assert image_size(_jpg()) is None                   # 假 jpg，没有 SOF 段
+
+
+def test_local_rules_catch_low_resolution_without_the_model():
+    """分工：客观硬伤由本地规则判，**一次模型调用都不该花**。
+
+    体积够大但只有 320×240 的图——体积规则抓不到，得靠读文件头拿像素尺寸。
+    """
+    from app.materials.verify import StubChecker
+
+    spec = {"id": "id_card", "name": "法定代表人身份证", "reason": "证明身份",
+            "fix_hint": "把身份证「{slot}」平放再拍。"}
+    small = _png(320, 240)
+
+    # 没配模型时，桩核验独立就能拦下
+    verdict = StubChecker().check(spec, "s.png", small, slot="正面")
+    assert verdict["result"] == "需补正", verdict
+    assert "320×240" in verdict["reason"], verdict
+    assert "把身份证「正面」平放再拍。" in verdict["reason"], verdict
+
+    # 配了模型时：本地先判，模型一次都不调
+    checker, session = _vision([_vision_reply('{"ok": true}')])
+    assert checker.check(spec, "s.png", small, slot="正面")["result"] == "需补正"
+    assert session.calls == [], session.calls
+
+
+def test_local_pass_still_goes_to_the_model():
+    """反过来：本地判不出问题时才真的把图交给模型——否则多模态就白接了。"""
+    checker, session = _vision([_vision_reply('{"ok": true}')])
+    spec = {"id": "id_card", "name": "法定代表人身份证", "reason": "证明身份"}
+
+    verdict = checker.check(spec, "big.png", _png(1080, 1920), slot="正面")
+    assert verdict["result"] == "通过", verdict
+    assert len(session.calls) == 1, session.calls        # 高清图才值得问语义
+
+    parts = session.calls[0]["json"]["messages"][1]["content"]
+    assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,"), parts[1]
+
+
 def test_vision_checker_falls_back_when_model_unavailable():
     """模型故障 / 返回乱码 / 没开模型 —— 一律回落桩规则，不能卡住办事。"""
     from app.materials.verify import VisionChecker
@@ -569,6 +636,93 @@ def test_service_switches_to_vision_when_model_configured():
     assert live.checker.model == "qwen-vl", live.checker.model
 
 
+# ---------- 真实 HTTP 通路（配了模型时）----------
+
+class _LoopbackUpstream:
+    """一个最小的 OpenAI 兼容端点，用来验证"配了模型"这条真实通路。
+
+    它只做两件真事：把收到的请求记下来、按用例指定的内容回复。这样能验证
+    base64 图片真的发出去了、回复真的被解析成了用户提示——
+    **唯一没验的只剩"模型本身的判断力"，那需要真 key。**
+    """
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.requests = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                outer.requests.append({
+                    "path": self.path,
+                    "auth": self.headers.get("Authorization"),
+                    "json": json.loads(self.rfile.read(length) or b"{}"),
+                })
+                raw = json.dumps(
+                    {"choices": [{"message": {"content": outer.reply}}]}
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args):
+                pass        # 别把访问日志混进测试输出
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def base_url(self):
+        return "http://127.0.0.1:" + str(self.server.server_address[1]) + "/v1"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_live_path_sends_image_and_applies_model_verdict():
+    """配了模型时，真实 HTTP 通路整条要走通：发 base64 图片 -> 解析回复 -> 变成用户提示。"""
+    from app.materials.verify import VisionChecker
+
+    upstream = _LoopbackUpstream(
+        '{"ok": false, "problem": "画面里是一张餐桌", "fix": "把身份证平放在桌面上再拍"}')
+    try:
+        no = next(_SEQ)
+        service = MaterialService(
+            store=MaterialStore(intakes_file=TMP / ("live" + str(no)) / "intakes.json",
+                                materials_dir=TMP / ("live" + str(no)) / "materials"),
+            moma=MoMAClient(api_base=upstream.base_url, api_key="test-key"),
+        )
+        assert isinstance(service.checker, VisionChecker), service.checker
+
+        scenario = _scenario("restaurant_open")
+        intake = service.plan(scenario, RESTAURANT_ANSWERS)
+        view = service.upload(scenario, intake, "id_card", "front.png", "image/png",
+                              _png(1080, 1920), slot="正面")
+
+        # 1) 请求真的发到了上游，形状是 OpenAI 兼容的多模态
+        assert len(upstream.requests) == 1, upstream.requests
+        sent = upstream.requests[0]
+        assert sent["path"].endswith("/chat/completions"), sent["path"]
+        assert sent["auth"] == "Bearer test-key", sent["auth"]
+        parts = sent["json"]["messages"][1]["content"]
+        assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,"), parts[1]
+
+        # 2) 回复被解析成对用户可见的补正提示
+        id_card = next(item for item in view["materials"] if item["id"] == "id_card")
+        assert id_card["status"] == NEED_FIX, id_card
+        reason = id_card["files"][0]["reason"]
+        assert "法定代表人身份证" in reason, reason
+        assert "画面里是一张餐桌" in reason, reason            # 模型说的问题转达给用户
+        assert "把身份证平放在桌面上再拍" in reason, reason      # 模型给的动作也带上
+    finally:
+        upstream.close()
+
+
 if __name__ == "__main__":
     test_plan_follows_condition_rules()
     test_upload_enforces_slots_and_count()
@@ -587,9 +741,13 @@ if __name__ == "__main__":
     test_vision_messages_carry_text_and_image()
     test_vision_checker_flags_wrong_document()
     test_vision_checker_skips_non_image_and_huge_file()
+    test_image_size_reads_jpeg_and_png_headers()
+    test_local_rules_catch_low_resolution_without_the_model()
+    test_local_pass_still_goes_to_the_model()
     test_vision_checker_falls_back_when_model_unavailable()
     test_build_checker_selects_by_live_model()
     test_form_check_runs_before_model()
     test_service_and_agent_actually_use_the_checker()
     test_service_switches_to_vision_when_model_configured()
+    test_live_path_sends_image_and_applies_model_verdict()
     print("ALL MATERIALS TESTS PASSED")

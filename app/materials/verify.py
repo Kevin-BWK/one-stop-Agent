@@ -6,13 +6,19 @@
    不合格直接 `不通过`（文件收不下，前端要重选）；
 2. **内容核验**（核验器）：这份材料的照片**是不是真是那份材料**、清不清晰。
 
-内容核验按"当前有没有可用的多模态模型"自动选实现：
+## 分工：简单的本地判，只有必须语义判断的才交给大模型
 
-- `VisionChecker`：调用 MoMA 视觉模型（`qwen-vl`）看图判断；
-- `StubChecker`：一条可解释的规则代替模型（图片过小判为"不是原图"），
-  零依赖、离线可跑，且保留「需补正」闭环。
+| 判什么 | 谁判 | 为什么 |
+| --- | --- | --- |
+| 格式 / 空文件 / 体积上限 | 本地规则（`form_check`） | 硬规则，与内容无关；格式不对的文件连图都解不出 |
+| 图片体积过小 / **像素分辨率过低** | 本地规则（`StubChecker`，读文件头） | **客观事实**，读文件头就能得到，没有语义成分 |
+| **这张图到底是不是这份材料** | **多模态模型**（`VisionChecker`） | 只能是语义判断，规则写不出来 |
+| 清晰度 / 反光 / 裁边 / 屏幕翻拍 | 多模态模型 | 同上（启发式规则误判率高，交给模型更准） |
 
-**降级策略（很重要）**：模型不可用 / 超时 / 返回无法解析 → 一律**回落桩规则**。
+`VisionChecker` 是"本地规则 + 语义模型"的组合：**本地规则永远先跑，判出问题就直接返回，
+不花这一次模型调用**；本地判不出来、又必须语义判断时，才真的问模型。
+
+**降级策略（很重要）**：模型不可用 / 超时 / 返回无法解析 → 一律**回落到本地规则层的结论**。
 材料核验是办事链路的必经环节，不能因为模型故障就让群众交不上材料。
 
 判定语义：
@@ -45,8 +51,9 @@ RESULT_PASS = "通过"
 RESULT_NEED_FIX = "需补正"
 RESULT_REJECT = "不通过"
 
-# 低于这个体积的图片视为缩略图 / 截图（桩规则用；清晰度判定交给视觉模型）
-MIN_IMAGE_BYTES = 5 * 1024
+# 本地规则能判的两条硬伤：都是客观事实，读文件头就够，不该花模型调用
+MIN_IMAGE_BYTES = 5 * 1024          # 低于这个体积，多半是缩略图 / 截图
+MIN_IMAGE_EDGE = 480                # 短边低于这个像素数，放大后看不清字
 IMAGE_EXTS = ("jpg", "jpeg", "png")
 
 # 超过这个体积就不送模型：base64 后请求体会再膨胀约 1/3，得不偿失，回落桩规则
@@ -78,6 +85,43 @@ def human_size(num: int) -> str:
     if num >= 1024:
         return str(int(round(num / 1024.0))) + "KB"
     return str(int(num)) + "B"
+
+
+def image_size(content: bytes) -> Optional[tuple]:
+    """零依赖读图片像素尺寸（只认 jpg / png），返回 `(宽, 高)`；读不出返回 `None`。
+
+    读不出时调用方**不做分辨率判断**——宁可少判一条，也不能把一张好图误判成"看不清"。
+    这也包括 HEIC 等本函数不认的格式（`accept` 里目前没有，真加了再补解析）。
+    """
+    if content[:8] == b"\x89PNG\r\n\x1a\n":
+        if len(content) >= 24:
+            return (int.from_bytes(content[16:20], "big"),
+                    int.from_bytes(content[20:24], "big"))
+        return None
+
+    if content[:2] == b"\xff\xd8":
+        index = 2
+        total = len(content)
+        while index + 9 <= total:
+            if content[index] != 0xFF:
+                index += 1
+                continue
+            marker = content[index + 1]
+            # 无载荷的标记：SOI、TEM、RSTn
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                index += 2
+                continue
+            seg_len = int.from_bytes(content[index + 2:index + 4], "big")
+            if seg_len < 2:
+                return None
+            # SOFn（排除 DHT=C4、JPG=C8、DAC=CC）里存着尺寸
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                return (int.from_bytes(content[index + 7:index + 9], "big"),
+                        int.from_bytes(content[index + 5:index + 7], "big"))
+            index += 2 + seg_len
+        return None
+
+    return None
 
 
 def material_label(spec: Dict[str, Any], slot: str = "") -> str:
@@ -139,14 +183,33 @@ def form_check(spec: Dict[str, Any], filename: str, content: bytes) -> Optional[
 
 
 class StubChecker:
-    """无模型时的内容核验：一条可解释的规则，保留「需补正」闭环。"""
+    """本地规则核验：**能用本地规则判的一律本地判**，不花模型调用。
+
+    覆盖两类"客观硬伤"——读文件头就能得出，没有语义成分：
+
+    - 图片体积过小（多半是缩略图 / 截图，不是原图）；
+    - 图片分辨率过低（放大后看不清字）。
+
+    没配多模态模型时，它单独承担内容核验；配了模型时，它仍是**前置层**先跑
+    （见 `VisionChecker`），只有它判不出来、且必须语义判断的部分才交给模型。
+    """
 
     def check(self, spec: Dict[str, Any], filename: str, content: bytes,
               slot: str = "") -> Dict[str, str]:
-        if ext_of(filename) in IMAGE_EXTS and len(content) < MIN_IMAGE_BYTES:
+        if ext_of(filename) not in IMAGE_EXTS:
+            return _passed()
+
+        if len(content) < MIN_IMAGE_BYTES:
             return _need_fix(
                 "这张图只有 " + human_size(len(content)) + "，太小了看不清内容"
                 "（多半是缩略图或截图，不是原图）。" + default_fix(spec, slot)
+            )
+
+        size = image_size(content)
+        if size and min(size) < MIN_IMAGE_EDGE:
+            return _need_fix(
+                "这张图只有 " + str(size[0]) + "×" + str(size[1]) + " 像素，放大后字会糊"
+                "（像是截图，或拍照时被压缩过）。" + default_fix(spec, slot)
             )
         return _passed()
 
@@ -184,38 +247,50 @@ def parse_verdict(reply: Any) -> Optional[Dict[str, Any]]:
 
 
 class VisionChecker:
-    """接了多模态模型的核验：看图判断是不是该材料的合规件。
+    """本地规则 + 语义模型：**简单的本地判，只有必须语义判断的才问模型**。
 
-    只在"是图片、且体积可承受"时才真的调模型；其余（非图片 / 图太大 / 模型不可用 /
-    返回无法解析）一律回落桩规则。
+    执行顺序（见模块开头的分工表）：
+
+    1. 本地规则层先跑（`StubChecker`）：判出问题就**直接返回，一次模型调用都不花**；
+    2. 没有视觉通道的（非图片 / 图太大）也到此为止，本地结论就是最终结论；
+    3. 只剩一个本地判不了、且必须语义判断的问题——**这张图到底是不是这份材料**——才调模型；
+    4. 模型不可用 / 超时 / 返回无法解析 → 回落第 1 步的结论（办事链路不能卡在模型上）。
     """
 
-    def __init__(self, moma, model: str = "", role: str = "sub", fallback=None):
+    def __init__(self, moma, model: str = "", role: str = "sub", local=None):
         self.moma = moma
         self.model = model or "qwen-vl"
         self.role = role
-        self.fallback = fallback or StubChecker()
+        # 本地规则层：既是"能判就不问模型"的前置过滤，也是模型不可用时的兜底
+        self.local = local or StubChecker()
 
     def check(self, spec: Dict[str, Any], filename: str, content: bytes,
               slot: str = "") -> Dict[str, str]:
+        # 1) 本地规则先跑：能判的一律不花模型调用
+        local = self.local.check(spec, filename, content, slot)
+        if local["result"] != RESULT_PASS:
+            return local
+
+        # 2) 没有视觉通道（非图片 / 图太大）：本地结论就是最终结论
         ext = ext_of(filename)
         if ext not in IMAGE_EXTS or len(content) > VISION_MAX_BYTES:
-            return self.fallback.check(spec, filename, content, slot)
+            return local
 
+        # 3) 剩下的才是必须语义判断的：这张图到底是不是这份材料
         try:
             reply = self.moma.complete(
                 self.model,
                 self.messages(spec, slot, ext, content),
-                fallback="",        # 桩模式只会拿到空串 -> 解析失败 -> 回落桩规则
+                fallback="",        # 桩模式只会拿到空串 -> 解析失败 -> 回落本地规则
                 role=self.role,
             )
         except Exception:
             # 模型故障不该卡住办事：交材料这条链路必须能走下去
-            return self.fallback.check(spec, filename, content, slot)
+            return local
 
         verdict = parse_verdict(reply)
         if verdict is None:
-            return self.fallback.check(spec, filename, content, slot)
+            return local
         if verdict["ok"]:
             return _passed()
         return _need_fix(self.describe_rejection(spec, slot, verdict))
