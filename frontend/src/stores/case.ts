@@ -3,7 +3,9 @@ import { defineStore } from 'pinia'
 import {
   askQuestion,
   createIntake,
+  createSession,
   fetchCase,
+  fetchPreview,
   fetchScenario,
   removeMaterialFile,
   uploadMaterialFile
@@ -12,6 +14,7 @@ import { subscribeApply } from '@/api/stream'
 import type {
   ChatMessage,
   CollectField,
+  ConditionPreview,
   FlowNode,
   MaterialItem,
   MaterialSummary,
@@ -70,12 +73,24 @@ export const useCaseStore = defineStore('case', {
     itemStatus: {} as Record<string, string>,
     itemOutput: {} as Record<string, string>,
     caseId: '',
+    /** 会话号：用户第一次提问时懒建，用于对话区的多轮上下文 */
+    sessionId: '',
     /** 材料收集单号：填完信息、拿到材料清单后才有 */
     intakeId: '',
     materials: [] as MaterialItem[],
     materialSummary: { total: 0, passed: 0, ready: false } as MaterialSummary,
     /** 正在上传/撤回的那一项（`materialId|slot`），用于禁用按钮 */
     materialBusy: '',
+    /**
+     * 上一次上传被拒的说明（格式 / 体积这类文件没进来的问题）。
+     *
+     * 带 `materialId` 是为了挂在对应材料条目下——全局浮层离用户刚点的槽位太远，
+     * 对不上"我传的是哪份"。
+     */
+    materialNotice: null as null | { materialId: string; text: string },
+    /** 条件判定实时预判（见 /api/preview）：按目前填了多少预估事项与材料 */
+    preview: null as ConditionPreview | null,
+    previewTimer: null as null | ReturnType<typeof setTimeout>,
     running: false,
     preparing: false,
     asking: false,
@@ -138,10 +153,17 @@ export const useCaseStore = defineStore('case', {
 
     reset() {
       this.messages = []
+      this.sessionId = ''
       this.intakeId = ''
       this.materials = []
       this.materialSummary = { total: 0, passed: 0, ready: false }
       this.materialBusy = ''
+      this.materialNotice = null
+      this.preview = null
+      if (this.previewTimer) {
+        clearTimeout(this.previewTimer)
+        this.previewTimer = null
+      }
       this.resetProgress()
     },
 
@@ -167,6 +189,30 @@ export const useCaseStore = defineStore('case', {
 
     setAnswer(key: string, value: any) {
       this.answers[key] = value
+      this.schedulePreview()
+    },
+
+    /** 字段改动后延迟刷新预判（防抖，避免每敲一个字就请求一次） */
+    schedulePreview() {
+      if (this.previewTimer) {
+        clearTimeout(this.previewTimer)
+      }
+      this.previewTimer = setTimeout(() => {
+        this.previewTimer = null
+        this.refreshPreview()
+      }, 500)
+    },
+
+    /** 拉一次条件判定预判（只读、无副作用；失败静默保留上一次，不打扰用户） */
+    async refreshPreview() {
+      if (!this.scenario) {
+        return
+      }
+      try {
+        this.preview = await fetchPreview(this.scenarioId, this.answers)
+      } catch (e) {
+        // 预判只是辅助信息，失败不该弹错
+      }
     },
 
     /** 把用户填写的表单转成一句自然语言（既是"我说的话"，也作为意图识别输入） */
@@ -207,6 +253,8 @@ export const useCaseStore = defineStore('case', {
         const view = await createIntake(this.scenarioId, this.answers)
         this.pushMessage('你', utterance)
         this.applyMaterialView(view)
+        // 信息已采齐：让预判与正式清单对齐
+        await this.refreshPreview()
         if (view.message) {
           this.pushMessage('材料Agent', view.message)
         }
@@ -222,6 +270,8 @@ export const useCaseStore = defineStore('case', {
       this.intakeId = view.intake_id
       this.materials = view.materials
       this.materialSummary = view.summary
+      // 拿到了新的材料区状态，说明上一次的拒收问题已经翻篇
+      this.materialNotice = null
     },
 
     /** 拍照 / 从相册选一张：App 端能直接调摄像头，桌面浏览器会退化为选文件 */
@@ -264,7 +314,9 @@ export const useCaseStore = defineStore('case', {
       try {
         this.applyMaterialView(await uploadMaterialFile(this.intakeId, materialId, filePath, slot))
       } catch (e: any) {
-        this.error = e && e.message ? e.message : '上传失败'
+        const text = e && e.message ? e.message : '上传失败'
+        this.error = text
+        this.materialNotice = { materialId, text }
       } finally {
         this.materialBusy = ''
       }
@@ -369,6 +421,16 @@ export const useCaseStore = defineStore('case', {
       }
     },
 
+    /** 拿到会话号（没有就懒建一个）。会话是对话区"多轮上下文"的前提。 */
+    async ensureSession(): Promise<string> {
+      if (this.sessionId) {
+        return this.sessionId
+      }
+      const created = await createSession(this.scenarioId)
+      this.sessionId = created.session_id
+      return this.sessionId
+    },
+
     /** 对话区提问：任何时候都能问，答完不影响正在填的信息 */
     async ask(question: string) {
       const text = (question || '').trim()
@@ -378,7 +440,14 @@ export const useCaseStore = defineStore('case', {
       this.pushMessage('你', text)
       this.asking = true
       try {
-        const result = await askQuestion(this.scenarioId, text)
+        let sessionId = ''
+        try {
+          sessionId = await this.ensureSession()
+        } catch (e) {
+          // 建会话失败不该挡住提问：退回无状态问答（只是没有上下文）
+          sessionId = ''
+        }
+        const result = await askQuestion(this.scenarioId, text, sessionId)
         this.pushMessage('咨询Agent', result.answer)
       } catch (e: any) {
         this.error = e && e.message ? e.message : '咨询失败'
@@ -397,6 +466,8 @@ export const useCaseStore = defineStore('case', {
         this.intakeId = ''
         this.materials = []
         this.materialSummary = { total: 0, passed: 0, ready: false }
+        this.materialNotice = null
+        this.preview = null
         if (Array.isArray(found.flow)) {
           this.nodes = found.flow
         }

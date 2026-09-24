@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 9（API 28）起默认禁止明文 HTTP，而演示阶段后端是 http://<局域网IP>:8000。
+  这里放行明文，否则 App 真机上所有请求都会以 CLEARTEXT_NOT_PERMITTED 失败。
+
+  放置位置（云打包才会合并）：nativeResources/android/res/xml/network_security_config.xml
+  引用方式：AndroidManifest.xml 的 <application android:networkSecurityConfig="@xml/network_security_config"/>
+
+  上线前务必改成 HTTPS，并把下面的 cleartextTrafficPermitted 收紧（改为 false，或只对受控域名开白名单）。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

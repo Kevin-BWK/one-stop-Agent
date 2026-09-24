@@ -37,10 +37,16 @@ def load_scenario(scenario_id: str) -> Optional[Dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def answer_question(scenario: Dict[str, Any], question: str) -> str:
-    """咨询应答：复用咨询 Agent（接 MoMA 后即为真实对话模型，接口不变）。"""
-    agent = ConsultAgent(MoMAClient(), SessionContext())
-    return agent.answer(question, scenario)
+def answer_question(scenario: Dict[str, Any], question: str, context=None,
+                    knowledge=None) -> str:
+    """咨询应答：复用咨询 Agent（接 MoMA 后即为真实对话模型，接口不变）。
+
+    传入 `context`（会话上下文）时会带上该会话的历史问答，即**多轮上下文**；
+    不传则用一次性上下文，等价于无状态的单轮问答。
+    传入 `knowledge` 时会先检索办事指南作为作答依据（见 `docs/11`）。
+    """
+    agent = ConsultAgent(MoMAClient(), context if context is not None else SessionContext())
+    return agent.answer(question, scenario, knowledge)
 
 
 def missing_required(scenario: Dict[str, Any], answers: Optional[Dict[str, Any]]) -> list:
@@ -56,15 +62,19 @@ def missing_required(scenario: Dict[str, Any], answers: Optional[Dict[str, Any]]
     return missing
 
 
-def load_case(case_id: str) -> Optional[Dict[str, Any]]:
-    """按单号读取已落盘的办理单（含 flow 节点台账）。"""
-    case = JsonFileRepo(CASES_FILE).get_case(case_id)
+def load_case(case_id: str, repo=None) -> Optional[Dict[str, Any]]:
+    """按单号读取办理单（含 flow 节点台账）。
+
+    `repo` 为 `app/storage/base.py::CaseRepo` 实现；不传时用 JSON 文件实现
+    （保持 CLI / 老调用方行为不变）。生产由 `create_app` 注入数据库实现。
+    """
+    case = (repo or JsonFileRepo(CASES_FILE)).get_case(case_id)
     return case.to_dict() if case else None
 
 
-def load_intake(intake_id: str) -> Optional[MaterialIntake]:
+def load_intake(intake_id: str, store=None) -> Optional[MaterialIntake]:
     """按受理号读取材料收集单。"""
-    return get_store().get(intake_id) if intake_id else None
+    return (store or get_store()).get(intake_id) if intake_id else None
 
 
 def material_gate(scenario: Dict[str, Any], intake: Optional[MaterialIntake]) -> list:
@@ -83,13 +93,19 @@ def material_gate(scenario: Dict[str, Any], intake: Optional[MaterialIntake]) ->
     return blocked
 
 
-def build_agent(scenario: Dict[str, Any]) -> MainAgent:
+def build_agent(scenario: Dict[str, Any], repo=None, ids=None,
+                materials=None) -> MainAgent:
+    """装配一次编排用的主 Agent。
+
+    `repo` / `ids` 由 `create_app` 注入（默认 JSON 文件 / 进程内实现）；
+    `MockGovServices` 与 `repo` 共用同一个发号器，多进程时办理单号才不重号。
+    """
     return MainAgent(
         scenario=scenario,
         moma=MoMAClient(),
         knowledge=KnowledgeBase(ROOT / "data" / "knowledge"),
-        gov=MockGovServices(),
-        repo=JsonFileRepo(CASES_FILE),
+        gov=MockGovServices(ids=ids) if ids is not None else MockGovServices(),
+        repo=repo if repo is not None else JsonFileRepo(CASES_FILE),
         context=SessionContext(),
     )
 
@@ -97,19 +113,23 @@ def build_agent(scenario: Dict[str, Any]) -> MainAgent:
 def iter_events(scenario: Dict[str, Any], utterance: str,
                 answers: Optional[Dict[str, Any]] = None,
                 intake: Optional[MaterialIntake] = None,
-                on_finish=None) -> Iterator[Event]:
+                on_finish=None, owner_id: str = "", repo=None,
+                ids=None) -> Iterator[Event]:
     """跑一次编排，按发生顺序产出事件（供 SSE / WebSocket 使用）。
 
     传入 intake 表示材料已提交齐备，编排从「材料核验」续跑到办结。
     `on_finish(case)` 在编排结束后（生成办理单时）回调，多轮会话用它把
     办理单挂回 session；客户端提前断开也不影响它被调用。
+    `owner_id` 是办理单归属用户（多用户隔离，见 `docs/12`）；
+    `repo` / `ids` 为注入的存储与发号器（不传时用默认实现，行为不变）。
     """
-    agent = build_agent(scenario)
+    agent = build_agent(scenario, repo=repo, ids=ids)
     bucket: "queue.Queue" = queue.Queue()
 
     def worker():
         try:
-            _, case = agent.run(utterance, answers or {}, on_event=bucket.put, intake=intake)
+            _, case = agent.run(utterance, answers or {}, on_event=bucket.put,
+                                intake=intake, owner_id=owner_id)
             if on_finish is not None and case is not None:
                 on_finish(case)
         except Exception as exc:  # 编排异常也要让前端收到，不能静默
@@ -135,8 +155,9 @@ def to_sse(event: Event, event_id: int) -> str:
 def sse_stream(scenario: Dict[str, Any], utterance: str,
                answers: Optional[Dict[str, Any]] = None,
                intake: Optional[MaterialIntake] = None,
-               on_finish=None):
-    """SSE 响应体生成器。"""
-    events = iter_events(scenario, utterance, answers, intake, on_finish)
+               on_finish=None, owner_id: str = "", repo=None, ids=None):
+    """SSE 响应体生成器（参数透传给 `iter_events`）。"""
+    events = iter_events(scenario, utterance, answers, intake, on_finish,
+                         owner_id=owner_id, repo=repo, ids=ids)
     for index, event in enumerate(events, start=1):
         yield to_sse(event, index)

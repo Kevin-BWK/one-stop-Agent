@@ -69,7 +69,8 @@ one-stop-agent/
 │   ├── knowledge/           # 知识检索
 │   ├── mock_gov/            # 政务系统 Mock（并联办理与状态推进）
 │   ├── models/              # 数据模型
-│   └── storage/             # 存储（内存 / JSON 文件）
+│   ├── auth/                # 多用户鉴权（用户 / 口令哈希 / 令牌 / RBAC，见 docs/12）
+│   └── storage/             # 存储抽象与装配（接口 / 内存 / JSON / 原子写 / 发号器）
 └── tests/                   # 冒烟测试
 ```
 
@@ -80,7 +81,7 @@ one-stop-agent/
 | 语言 / 运行 | Python 3.10+ 标准库（dataclass） | Python + FastAPI + uvicorn |
 | 平台底座 | `MoMAClient`（桩 / 真实可切换） | 移动云 MoMA 多模型调度 / 路由 / 上下文 |
 | 模型 | deepseek-r1 / qwen-turbo / qwen-vl / 规则引擎（桩） | 九天大模型 + DeepSeek / Qwen / GLM / Qwen-VL |
-| 知识检索 | 整篇 markdown 返回 | 向量库 + Embedding（BGE 等）RAG |
+| 知识检索 | ✅ 关键词基线（切分 + 字符 2-gram + 标题加权，零依赖）+ 向量召回（可选，RRF 融合，见 `docs/11`） | 向量库（Milvus / pgvector）+ Embedding（BGE 等）+ Cross-Encoder 精排 |
 | 上下文 / 数据 | `SessionContext` / `InMemoryRepo` 内存 | Redis + PostgreSQL / MySQL |
 | 政务集成 | `MockGovServices` 本地模拟 | 市场监管 / 税务 / 消防 / 城管 / 卫健接口 |
 | 前端 | 暂未实现（预留，设计见「前端交互设计」） | uni-app（Vue 3 + TypeScript）：App（成品） / H5（测试用） + 事件推送（App: WebSocket / H5: SSE） |
@@ -96,12 +97,18 @@ python run_demo.py enterprise     # 只跑企业
 # 按办理单号查询办理进度看板
 python run_demo.py --query YJS0001
 
-# 冒烟测试（无需 pytest）
-python tests/test_flow.py
-python tests/test_materials.py      # 材料提交链路：清单 / 槽位 / 核验 / 补正 / 撤回 / 受理拦截
-python tests/test_moma_client.py    # MoMA 客户端：桩/真实、重试与降级（离线）
-python tests/test_api_e2e.py        # 端到端 HTTP：多轮会话 + 材料提交 + 异常分支
-python tests/test_server_smoke.py   # 服务层多轮会话闭环（零第三方依赖）
+# 冒烟测试（无需 pytest），按层组织
+python tests/test_condition_routing.py  # 规则层：条件判定矩阵（操作符 / 边界 / 组合 / 反向）
+python tests/test_knowledge.py          # 检索层：关键词基线（切分 / 打分 / 场景映射 / 兜底 / 咨询接线 / 检索带上下文）
+python tests/test_knowledge_vector.py   # 检索层（向量）：Embedding 客户端 / 语义召回 / RRF 融合 / 缓存 / 降级恢复 / 可观测（离线）
+python tests/test_knowledge_eval.py     # 检索层（评估）：12 条标注用例的 recall@1 / recall@k / MRR 回归门槛
+python tests/test_flow.py               # 编排层：MainAgent 闭环 + 流程节点 + 事件
+python tests/test_materials.py          # 材料层：清单 / 槽位 / 核验（含视觉核验与降级）/ 补正 / 撤回 / 受理拦截
+python tests/test_auth.py               # 安全层：口令 / 令牌 / 多用户隔离 / 材料越权 / 文件签名链接（见 docs/12）
+python tests/test_moma_client.py        # 模型层：MoMA 桩/真实、重试与降级（离线）
+python tests/test_server_smoke.py       # 服务层：多轮会话闭环（零第三方依赖）
+python tests/test_api_e2e.py            # 接口层：端到端 HTTP + 异常分支
+python tests/test_openapi_contract.py   # 契约层：后端 OpenAPI ↔ 前端 contract.ts（响应模型 / 字段一致）
 
 # 启动 API（需先 pip install -r requirements.txt）
 uvicorn server.main:app --reload
@@ -121,11 +128,12 @@ dev.bat -Stop               # 停止前后端
 | 模块 | 当前实现 | 真实接入 |
 | --- | --- | --- |
 | `app/moma/client.py` | ✅ 已支持真实 API（未配置环境变量时回退桩） | 配置 `MOMA_API_BASE` / `MOMA_API_KEY` 即启用 |
-| `app/knowledge/retriever.py` | 整篇返回 markdown 指南 | 向量检索 / RAG |
+| `app/knowledge/retriever.py` | ✅ 关键词基线 + 向量召回（RRF 融合；未配置自动降级，见 `docs/11`） | 配 `MOMA_EMBED_MODEL` 即启用向量；后续可换向量库（Milvus / pgvector）+ Cross-Encoder 精排 |
 | `app/mock_gov/services.py` | 本地内存模拟并联办理 | 对接真实政务系统 |
-| `app/storage/repo.py` | 内存 / JSON 文件（跨进程查询进度） | PostgreSQL / MySQL |
+| `app/storage/`（`base.py` 接口 + `factory.py` 装配） | 内存 / JSON 文件（跨进程查询进度）；会话 / 材料单 / 办理单 / 单号已按接口解耦，记 `owner_id` | Redis（会话）+ PostgreSQL / MySQL（办理单 / 用户）+ 数据库序列（单号）；`STORAGE_BACKEND=sql/redis` 注入实现即切换，业务代码零改动（见 `docs/12`） |
+| `app/auth/`（`models` / `security` / `service` / `store`） | 账号 + 口令哈希 + HMAC 自包含令牌 + RBAC；`AUTH_REQUIRED=1` 强制登录，默认关闭时按演示用户 | 接 HTTPS / 令牌吊销（`jti` 黑名单）/ 实名注册 / 审计日志（见 `docs/12`） |
 | `app/agents/consult_agent.py` | 拼固定话术 | MoMA 对话模型（见 `docs/08`） |
-| `app/agents/verify_agent.py` | 形式校验 + 一条可解释的桩内容核验（图片过小判为“需补正”），**不读真实图像内容** | MoMA 多模态识别 + 规则校验（见 `docs/09`） |
+| `app/agents/verify_agent.py` | 三级分工：形式校验（格式/体积）→ 本地规则（体积过小、**读文件头判分辨率**）→ 只有“是不是这份材料”才交 `qwen-vl`；模型不可用回落本地结论 | 更细的要素级校验（证号 / 有效期 / 与表单字段比对，见 `docs/09`） |
 | `app/agents/item_agent.py` | 直接返回“已办结” | 调用各部门政务系统，异步回调（见 `docs/06`） |
 | `app/materials/store.py` | 材料与文件落本地磁盘 `data/runtime/materials/` | 对象存储（OSS / COS）+ 文件编号 |
 | 电子证照共享 | **未做**（所有材料都要求上传） | 对接本地电子证照库，材料条目加 `source` 字段（见 `docs/09`） |
@@ -153,6 +161,7 @@ dev.bat -Stop               # 停止前后端
 - **进度是真实办理进度**：后端每完成一个节点 / 每收到一次部门子 Agent 回调，立即推一条事件，看板增量刷新——进度零延迟、无空转。
 - **动态表单**：表单区消费 `scenarios/*.json` 的 `collect_fields` 自动渲染控件，新增“一件事”不改前端。
 - **材料区**：清单、槽位与张数上限全部由后端下发（`GET /api/materials/{intake_id}`），前端只负责渲染与发起拍照 / 选文件；上传走 `uni.uploadFile`（multipart），材料齐备后才允许开始办理（见 `docs/09`）。
+- **实时预判**：填表过程中按当前已填字段预判"预计要办什么、交什么"（`POST /api/preview`，只读无副作用，前端 500ms 防抖）；字段采齐后才由 `POST /api/materials/intake` 产出**正式清单**，界面区分"预判"与"最终"（见 `docs/09`）。
 - **事件负载复用现有结构**：`flow_node` 取 `FlowProgress.snapshot()`，`item_done` 取部门回调结果，`case_created` / `finished` 取 `CaseRecord`。
 
 事件与前端处理的对应：
@@ -166,7 +175,9 @@ dev.bat -Stop               # 停止前后端
 | `finished` | 最终 `flow` / `item_status` | 结束态 |
 | `error` | `code` / `message` | 提示并恢复界面 |
 
-> 说明：**前端尚未实现**；其依赖的编排事件出口（`MainAgent.run / query` 的可选 `on_event` 回调，`Event.to_dict()` 可直接序列化为事件 JSON）已就绪，服务层推送即可（App: WebSocket；H5: SSE）。完整的工程结构、事件契约与接口定义见 `docs/07-前端交互设计.md`。
+> 说明：**前端（uni-app）H5 调试端已实现**——聊天 + 动态表单 + 材料区 + 进度看板，H5 走 SSE、App 走 WebSocket（同一份代码，见 `frontend/src/api/stream.ts`）。
+> **App 成品端打包：配置已就绪**——`appid` / 包名 / 权限 / 明文 HTTP（`nativeResources` + `AndroidManifest.xml`）/ 后端基址均已配，`npm run build:app` 已产出可导入 HBuilderX 的产物；剩 `appid` 换 DCloud 正式值与 HBuilderX 真机打包（见 `docs/10-App打包前检查清单.md`）。
+> 完整的事件契约与接口定义见 `docs/07-前端交互设计.md`。
 
 ## MoMA 真实接入
 
@@ -191,6 +202,16 @@ dev.bat -Stop               # 停止前后端
 | `MOMA_DISABLE_LIVE` | 设为 `1` 时忽略环境变量、强制桩模式（测试 / 离线演示用） |
 | `MOMA_MODEL_STRONG` / `_LIGHT` / `_VISION` / `_RULE` | 未配置角色模型时，按任务覆盖内置模型池 |
 | `MOMA_API_BASE` / `MOMA_API_KEY` | 兼容旧用法：作为主角色的回退配置 |
+
+知识检索的向量通道（可选，见 `docs/11`）：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `MOMA_EMBED_MODEL` | 向量模型名，**配了它才启用向量召回**（如 `bge-large-zh`） |
+| `MOMA_EMBED_API_BASE` / `MOMA_EMBED_API_KEY` | 向量端点与密钥，默认回退主角色配置 |
+| `MOMA_EMBED_MIN_SCORE` | 余弦相似度下限，低于它的召回丢弃；不配则按模型名取默认（BGE 0.45 / OpenAI 0.30） |
+
+未配置时检索走零依赖关键词基线，行为与之前完全一致；向量端点不可用会自动降级基线。
 
 **密钥安全（重要）**
 
@@ -217,6 +238,33 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 
 > 未配置时自动回退桩模式；配置后无需修改任何业务代码。
 
+## 多用户与鉴权（见 `docs/12`）
+
+给多个真实用户使用前，服务端已从"单进程 + 内存状态 + 无鉴权"改造为**多用户架构**：
+
+- **数据归属**：会话 / 材料收集单 / 办理单都记 `owner_id`，接口按归属校验（RBAC：
+  办事人只能看自己的；工作人员可跨用户查已受理的办理单，读不到别人的会话草稿与材料）。
+- **账号与令牌**：`POST /api/auth/register` / `/api/auth/login` / `GET /api/auth/me`；
+  口令 PBKDF2 哈希（永不落明文），登录返回 HMAC 自包含令牌（服务端无状态校验，适配多进程）。
+- **材料接口鉴权**：清单 / 上传 / 撤回按归属校验；文件读取要么带**绑定到该文件的短时签名链接**
+  （`?token=`，图片可直接当 `<image src>`），要么带**归属人本人的登录令牌**。
+- **存储抽象（留出的数据库接口）**：`app/storage/base.py` 定义
+  `CaseRepo` / `SessionRepo` / `UserStore` / `IdAllocator` 四个接口，
+  `build_storage()` 是唯一切换点；`STORAGE_BACKEND=sql/redis` 目前只留接口，
+  注入实现即可切换，业务代码零改动。
+
+| 环境变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `AUTH_REQUIRED` | 关闭 | 置 `1` 强制登录；**默认关闭**，未登录请求按演示用户处理，单用户 Demo 行为不变 |
+| `AUTH_SECRET` | 开发自动生成 | 令牌签名密钥；生产**必须显式配置且各实例一致** |
+| `AUTH_TOKEN_TTL` / `AUTH_FILE_URL_TTL` | 7 天 / 10 分钟 | 登录令牌 / 材料文件签名链接有效期（秒） |
+| `STORAGE_BACKEND` | `json` | `memory` / `json` / `sql` / `redis` |
+| `INSTANCE_ID` | 空 | 多实例发号前缀（`YJS0001` → `YJSi0001`） |
+
+```bash
+python tests/test_auth.py    # 多用户隔离 / 越权 / 文件签名链接 / 兼容开关
+```
+
 ## 工作总结与分工
 
 ### 已完成工作
@@ -226,6 +274,10 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - 办理进度可推进：流程节点逐个“打勾”（意图识别 → … → 进度跟踪），并联事项由各部门事项子 Agent 办结后回调主 Agent 自动打勾，支持按单号查询进度看板。
 - 材料提交与核验：材料条目化（含“为什么交 / 怎么给 / 格式 / 槽位”），支持拍照 / 相册 / 选文件逐项上传，形式校验 + 桩内容核验，需补正可原地重传，必交材料全部通过才允许并联提交（见 `docs/09`）。
 - 受理入口统一：表单式（`/apply`）与对话式（`/api/session` + `/api/chat` + `/api/fields`）两条路径**共用同一套 `MainAgent` 编排与材料提交**；多轮会话只负责采集与材料清单，不再自行受理（见 `docs/09`）。
+- 对话式办理：聊天区可输入、随时插问；提问走会话（`ensureSession()` + `/api/ask` 带 `session_id`），服务端按会话记住问答，最近 3 轮历史带进模型上下文（见 `docs/08`）。
+- 知识检索：咨询时按问题检索办事指南片段作为作答依据（两级切分 + 字符 2-gram + 标题加权，零依赖）；真实/离线两条路径都带依据，不传知识库时行为不变（见 `docs/11`）。
+- 向量化检索：关键词基线之外新增 Embedding 向量召回，两路 **RRF 融合**（语义相近即可命中，如问"排烟"能找到"油烟净化设施"）；配 `MOMA_EMBED_MODEL` 即启用，向量落盘缓存、阈值按模型取默认、端点失败降级并**冷却后自动重试**；检索 query 带最近几轮用户提问（省略句不再跑偏），`explain()` / `stats()` 可观测，附 12 条标注用例的 **recall/MRR 回归门槛**，**对外契约不变**（见 `docs/11`）。
+- 文案自然语言化：结构化进度看板只进 CLI / 进度看板，**推给对话区的都是自然语言**；材料与事项一律用中文名，不出现 JSON 字面量、内部 id、模型名（见 `docs/08`）。
 - 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 uni-app 前端实时刷新进度预留。
 - 配置化条件路由：面积、油烟、生食/冷食、招牌、银行开户、用工人数等按规则增减事项与材料。
 - MoMA 三大能力落点（多模型调度 / 智能路由 / 上下文管理）：支持桩 / 真实一键切换（配置 `MOMA_API_BASE` / `MOMA_API_KEY` 即走真实，见「MoMA 真实接入」）。
@@ -253,7 +305,8 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] README / 设计文档 / GitHub 发布
 - [x] FastAPI 服务层 + 多轮会话改造
 - [x] MoMA 真实 API 接入
-- [ ] 前端（uni-app：App（成品） / H5（测试用），协作 · 以 Anjie 为主）
+- [x] 前端 H5 调试端（uni-app：Vue 3 + TypeScript，协作 · 以 Anjie 为主）
+- [ ] 前端 App 成品端打包（代码适配、依赖与打包配置均已就绪，`npm run build:app` 已出产物，`appid` 已填项目名占位；剩**换 DCloud 正式 `appid`** 与 HBuilderX 真机打包，见 `docs/10`，协作 · 以 Anjie 为主）
 
 #### Anjie（组员）· 场景与业务
 
@@ -264,18 +317,23 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] 冒烟测试
 - [x] 进度状态推进（流程节点打勾 + 部门子 Agent 办结回调 + 编排事件出口）
 - [x] 材料提交与核验（材料清单 / 逐项上传与核验 / 补正闭环 / 受理前置校验，见 `docs/09`）
-- [ ] 前端（uni-app，Vue 3 + TypeScript，App（成品） / H5（测试用），主负责 · Kevin 协作）
-- [ ] 向量化知识库与 RAG
-- [ ] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
+- [x] 前端 H5 调试端（uni-app，Vue 3 + TypeScript，主负责 · Kevin 协作）
+- [ ] 前端 App 成品端打包（代码适配、依赖与打包配置均已就绪，`npm run build:app` 已出产物，`appid` 已填项目名占位；剩**换 DCloud 正式 `appid`** 与 HBuilderX 真机打包，见 `docs/10`，主负责 · Kevin 协作）
+- [x] 知识检索基线（按问题检索指南片段，见 `docs/11`）
+- [x] 向量化检索（Embedding 召回 + 关键词 RRF 融合 + 缓存 / 降级，见 `docs/11`）
+- [x] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
 
 ## 路线图
 
 - [x] 双场景骨架 + 完整编排闭环 + 条件路由
 - [x] 进度状态推进（让“办理进度”可变化）
-- [ ] uni-app 前端（Vue 3 + TypeScript，App（成品） / H5（测试用）：聊天 + 动态表单 + 进度看板，事件推送，见「前端交互设计」）
-- [ ] 对话式办理（聊天区可输入、多轮上下文、随时插问，见 `docs/08`）
+- [x] uni-app 前端 H5 调试端（聊天 + 动态表单 + 材料区 + 进度看板，SSE 事件推送，见「前端交互设计」）
+- [ ] uni-app App 成品端打包（**前端适配、依赖冲突与打包配置均已解决**：`uni.request` 跨端 + 可配绝对基址 + 条件编译选通道 + 权限声明 + 明文 HTTP（`nativeResources` + `AndroidManifest.xml`）+ `@vue/shared` override；`npm run build:app` 已出产物，`appid` 已填项目名占位，剩**换 DCloud 正式 `appid`** 与 HBuilderX 真机打包，见 `docs/10-App打包前检查清单.md`）
+- [x] 对话式办理（聊天区可输入、随时插问；提问走会话带多轮上下文，见 `docs/08`）
 - [x] 材料提交与核验（材料清单 + 逐项上传核验 + 补正闭环 + 受理前置校验，见 `docs/09`）
-- [ ] 提交前置校验 + 文案自然语言化（去掉 JSON 字面量与内部 id，见 `docs/08`）
+- [x] 提交前置校验 + 文案自然语言化（去 JSON 字面量与内部 id；结构化看板只进 CLI，对话区只收自然语言，见 `docs/08`）
 - [x] MoMA 真实 API 接入（桩/真实一键切换，主/子双角色）
-- [ ] 向量化知识库与 RAG 检索
-- [ ] 多模态材料核验
+- [x] 知识检索基线（按问题检索指南片段：两级切分 + 字符 2-gram + 标题加权，零依赖，见 `docs/11`）
+- [x] 向量化检索（Embedding 召回 + 关键词 RRF 融合；配 `MOMA_EMBED_MODEL` 即启用，未配置自动降级，契约不变，见 `docs/11`）
+- [x] 多模态材料核验（视觉核验器：图片 + 提示词交 `qwen-vl` 判断是否合规件；模型不可用自动回落桩规则，见 `docs/09`）
+- [x] 多用户架构与材料接口鉴权（会话 / 材料 / 办理单记归属 + RBAC + 账号令牌 + 文件签名链接；存储抽象留出数据库 / Redis 接口，`STORAGE_BACKEND` 一键切换，见 `docs/12`）

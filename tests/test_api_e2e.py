@@ -112,11 +112,12 @@ def main():
     assert r.json()["intent"] == "consult", r.json()
 
     # 餐饮店完整办理
+    # 条件判定的规则矩阵见 tests/test_condition_routing.py；
+    # 这里只留"通过 HTTP 提交的表单值真的流进了规则引擎"的集成冒烟（一正一反）。
     sid, t = apply_and_submit(client, "restaurant_open", RESTAURANT, "我想开一家牛肉面馆")
     case = t["case"]
-    assert "D_signboard" in case["items"], case["items"]
-    assert "C_fire" not in case["items"], case["items"]
-    assert "oil_purifier" in case["materials"], case["materials"]  # 热食 -> 油烟净化设施证明
+    assert "D_signboard" in case["items"], case["items"]   # 正向：设了招牌
+    assert "C_fire" not in case["items"], case["items"]    # 反向：80 平米
 
     # 办理单查询
     r = client.get(f"/api/cases/{case['case_id']}")
@@ -132,15 +133,40 @@ def main():
     p = r.json()
     assert p["intent"] == "query" and p["progress"], p
 
-    # 企业完整办理（条件路由：开户 + 用工备案）
+    # 企业场景也走一遍（证明换场景、换答案都能跑通）
     _, te = apply_and_submit(client, "enterprise_open", ENTERPRISE, "我想注册一家科技公司")
     assert "D_bank" in te["case"]["items"], te["case"]["items"]
-    assert "labor_filing" in te["case"]["materials"], te["case"]["materials"]  # 10 人 -> 用工备案
 
-    # 大面积触发消防
-    big = dict(RESTAURANT, area_sqm=500)
-    _, tb = apply_and_submit(client, "restaurant_open", big, "我想开一家大烧烤店")
-    assert "C_fire" in tb["case"]["items"], tb["case"]["items"]
+    # 对话区提问：带会话走多轮上下文，会话不存在返回 404
+    talk = client.post("/api/session", json={"scenario_id": "restaurant_open"}).json()
+    r = client.post("/api/ask", json={
+        "scenario_id": "restaurant_open", "question": "需要什么材料",
+        "session_id": talk["session_id"]})
+    assert r.status_code == 200 and r.json()["answer"], r.json()
+    # 知识库真的接上了：回答里带办事指南依据（见 docs/11）
+    assert "来自办事指南" in r.json()["answer"], r.json()["answer"]
+    r = client.post("/api/ask", json={
+        "scenario_id": "restaurant_open", "question": "hi", "session_id": "nope"})
+    assert r.status_code == 404, r.text
+    assert client.post("/api/ask", json={
+        "scenario_id": "restaurant_open", "question": "  "}).status_code == 400
+
+    # 条件判定实时预判：只读、无状态，按当前输入给出事项与材料
+    # （规则细节见 tests/test_condition_routing.py，这里只验接口契约）
+    base = client.post("/api/preview", json={"scenario_id": "restaurant_open", "answers": {}}).json()
+    assert base["items"], base
+    assert base["material_names"][0] == "法定代表人身份证", base    # id 已转成中文名
+
+    filled = client.post("/api/preview", json={
+        "scenario_id": "restaurant_open",
+        "answers": {"business_type": "热食/有油烟", "signboard": True}}).json()
+    assert filled["items"] != base["items"], filled                # 输入变了，预判就跟着变
+    # 中文输入要能正确落到规则上，并且 id 已映射成中文名
+    assert "油烟净化设施证明" in filled["material_names"], filled
+    assert "户外招牌设施设置" in filled["item_names"], filled
+    assert filled["notes"], filled                                 # 并说明为什么会多出这些
+
+    assert client.post("/api/preview", json={"scenario_id": "nope", "answers": {}}).status_code == 404
 
     # 异常分支
     assert client.post("/api/session", json={"scenario_id": "nope"}).status_code == 404

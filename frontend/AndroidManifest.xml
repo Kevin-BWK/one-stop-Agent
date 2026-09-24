@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自定义 Android 原生清单（云打包时与 manifest.json 生成的清单合并，见 docs/10）。
+  只做一件事：引用 nativeResources 里的网络安全配置，放行明文 HTTP。
+
+  约束（DCloud 官方要求，勿违反）：
+  - 根节点必须是 manifest，且带 xmlns:android / xmlns:tools，package 非空；
+  - 不要在这里重复配置 manifest.json 已配过的内容（权限等），冲突会导致打包失败；
+  - 不要配置 activity 的 theme / screenOrientation / configChanges / windowSoftInputMode / launchMode。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools"
+          package="com.onestop.agent">
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+</manifest>

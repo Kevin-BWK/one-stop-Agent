@@ -29,8 +29,11 @@ from app.moma.client import MoMAClient
 from app.moma.context import SessionContext
 from app.mock_gov.services import MockGovServices
 from app.models.schema import ApplicationForm, CaseRecord, MaterialIntake
+from app.orchestrator.preview import build_preview
 from app.orchestrator.router import route_intent
+from app.storage.ids import IdAllocator, InMemoryIdAllocator
 from app.storage.repo import InMemoryRepo
+from app.storage.sessions import InMemorySessionRepo
 
 
 @dataclass
@@ -45,29 +48,37 @@ class SessionRecord:
     intake: Optional[MaterialIntake] = None
     planned: bool = False
     case: Optional[CaseRecord] = None
+    # 会话归属的用户（多用户隔离；空串表示未启用鉴权的演示会话）
+    user_id: str = ""
 
 
 class AgentService:
-    """按 session 管理多轮办事流程的服务对象。"""
+    """按 session 管理多轮办事流程的服务对象。
 
-    def __init__(self, root: Optional[Path] = None, store=None):
+    存储（办理单 / 会话 / 单号）全部走可注入的接口（见 `app/storage`）：
+    默认进程内实现用于 Demo，装配了 Redis / 数据库实现即可多进程部署。
+    """
+
+    def __init__(self, root: Optional[Path] = None, store=None, cases=None,
+                 sessions=None, ids: IdAllocator = None, url_signer=None):
         self.root = Path(root) if root else ROOT
         self.moma = MoMAClient()
         self.knowledge = KnowledgeBase(self.root / "data" / "knowledge")
-        self.gov = MockGovServices()
-        self.repo = InMemoryRepo()
-        # 默认用进程内共享的材料存储；测试可传入隔离的 store
-        self.materials = MaterialService(store=store or get_store(), moma=self.moma)
-        self.sessions: Dict[str, SessionRecord] = {}
-        self._seq = 0
+        self.ids = ids if ids is not None else InMemoryIdAllocator()
+        self.gov = MockGovServices(ids=self.ids)
+        self.repo = cases if cases is not None else InMemoryRepo()
+        # 默认用进程内共享的材料存储；测试 / 服务层可传入隔离的 store
+        self.materials = MaterialService(store=store or get_store(), moma=self.moma,
+                                         url_signer=url_signer)
+        # 会话表：进程内实现（Redis 实现见 app/storage/base.py::SessionRepo）
+        self.sessions = sessions if sessions is not None else InMemorySessionRepo()
 
     # ---------- 对外接口 ----------
-    def create_session(self, scenario_id: str) -> dict:
+    def create_session(self, scenario_id: str, user_id: str = "") -> dict:
         scenario = self._load_scenario(scenario_id)
         if scenario is None:
             raise KeyError(f"场景不存在：{scenario_id}")
-        self._seq += 1
-        session_id = f"s{self._seq:06d}"
+        session_id = self.ids.next("s", 6)
         context = SessionContext()
         rec = SessionRecord(
             session_id=session_id,
@@ -76,8 +87,9 @@ class AgentService:
             context=context,
             form=ApplicationForm(scenario_id=scenario_id),
             agents=self._make_agents(context),
+            user_id=user_id,
         )
-        self.sessions[session_id] = rec
+        self.sessions.put(session_id, rec)
         opening = scenario.get("opening") or scenario["name"]
         return self._state(rec, message=opening)
 
@@ -90,7 +102,7 @@ class AgentService:
             text = rec.agents["progress"].query(rec.case.item_status, rec.scenario["items"])
             return self._state(rec, message=text, intent=intent)
         if intent == "consult":
-            reply = rec.agents["consult"].answer(message, rec.scenario)
+            reply = rec.agents["consult"].answer(message, rec.scenario, self.knowledge)
             return self._state(rec, message=reply, intent=intent)
         # apply
         if rec.planned:
@@ -119,6 +131,18 @@ class AgentService:
     def get_case(self, case_id: str) -> Optional[dict]:
         case = self.repo.get_case(case_id)
         return self._case_dict(case) if case else None
+
+    def owner_of(self, session_id: str) -> str:
+        """取会话归属用户（供 HTTP 层做访问控制）；会话不存在时抛 KeyError。"""
+        return self._get(session_id).user_id
+
+    def context_of(self, session_id: str) -> SessionContext:
+        """取某个会话的上下文。
+
+        咨询等需要"记住前几轮说了什么"的场景复用它；这也是对话区
+        （`/api/ask` 带 `session_id`）能获得多轮上下文的入口。
+        """
+        return self._get(session_id).context
 
     def attach_case(self, session_id: str, case: Optional[CaseRecord]) -> None:
         """把 `/apply` 生成的办理单挂回会话。
@@ -204,7 +228,7 @@ class AgentService:
             rec.context.set("items", items)
             rec.context.set("materials", materials)
             rec.intake = self.materials.plan_from_form(
-                rec.scenario, rec.form, items, materials, notes)
+                rec.scenario, rec.form, items, materials, notes, owner_id=rec.user_id)
             rec.planned = True
 
         intake = rec.intake
@@ -225,6 +249,9 @@ class AgentService:
             "next_question": self._next_question(rec),
             "items": rec.context.get("items", []),
             "materials": rec.context.get("materials", []),
+            # 实时预判：按"目前填了多少"预估事项与材料，只读、无副作用。
+            # 已产出材料清单（intake_id 非空）时它与正式清单一致。
+            "preview": build_preview(rec.scenario, rec.form.fields),
             "intake_id": rec.intake.intake_id if rec.intake else "",
             "material_view": self.materials.view(rec.scenario, rec.intake) if rec.intake else None,
             "case": self._case_dict(rec.case),
@@ -244,6 +271,7 @@ class AgentService:
             "flow": case.flow,
             "created_at": case.created_at,
             "updated_at": case.updated_at,
+            "owner_id": case.owner_id,
         }
 
     def _progress_list(self, rec: SessionRecord) -> List[dict]:

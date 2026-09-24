@@ -9,5 +9,5 @@
     "lib": ["esnext", "dom"],
     "types": ["@dcloudio/types"]
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue"]
+  "include": ["env.d.ts", "src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue"]
 }

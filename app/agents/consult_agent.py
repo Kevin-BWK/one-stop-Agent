@@ -7,7 +7,12 @@
    保证零依赖 Demo 与离线单测仍然可用。
 
 两条路径都遵守 `docs/08` 的文案规范：不出现 JSON 字面量、内部事项 id、字段 key、模型名。
+
+回答**可以带办事指南依据**：传入 `knowledge` 时先按问题检索相关片段（见
+`app/knowledge/retriever.py`），命中就作为模型作答的依据、也附在离线兜底回答后面。
+检索是增强项——没传知识库或没命中时，行为与之前完全一致。
 """
+from ..knowledge.retriever import format_chunks
 from ..materials.spec import material_names
 from .base import BaseAgent
 
@@ -20,18 +25,70 @@ APPLY_WORDS = ("我想", "我要", "想开", "想办", "注册", "申请", "开�
 class ConsultAgent(BaseAgent):
     name = "consult"
 
-    def answer(self, question, scenario):
+    # 带进对话上下文的最大历史条数（约 3 轮问答）。
+    # 不设上限会让长会话把请求撑爆，也会让模型被早期无关内容带偏。
+    MAX_HISTORY = 6
+
+    # 每次咨询带进办事指南的最大片段数
+    TOP_K = 3
+
+    # 检索 query 里最多拼入几轮历史**用户**提问（约 1 轮），避免把当前问题淹没
+    SEARCH_HISTORY = 2
+    # 单条历史在检索 query 里的最大字符数（长句只留开头，够定位话题即可）
+    SEARCH_HISTORY_CHARS = 120
+
+    def answer(self, question, scenario, knowledge=None):
+        """作答。传入 `knowledge` 时会先检索办事指南作为依据。"""
         model = self.model_for()
+        chunks = self._guide_chunks(knowledge, scenario, question)
         reply = self.moma.complete(
             model,
-            self._messages(question, scenario),
-            fallback=self._local_reply(question, scenario),  # 离线 / 失败时的人话兜底
+            self._messages(question, scenario, chunks),
+            fallback=self._local_reply(question, scenario, chunks),  # 离线 / 失败时的人话兜底
             context=self.context,
             role=self.role,
         )
         self.context.add_history("user", question)
         self.context.add_history("assistant", reply)
         return reply
+
+    # ---------- 办事指南依据 ----------
+
+    def _guide_chunks(self, knowledge, scenario, question):
+        """按问题检索办事指南片段；没传知识库、或没命中，都返回空列表。"""
+        if knowledge is None:
+            return []
+        try:
+            return knowledge.search(scenario.get("id", ""), self._search_query(question),
+                                    top_k=self.TOP_K)
+        except Exception:
+            # 检索是增强项：它出问题不该让"咨询"整个失败
+            return []
+
+    def _search_query(self, question):
+        """把最近几轮**用户提问**拼进检索 query（只影响检索，不改发给模型的消息）。
+
+        用户常问省略句（"那第二个呢""这个要多少钱"），只拿当前这句去检索会跑偏；
+        带上上文才定位得到话题。发给模型的消息仍用原问题——多轮上下文由
+        `context.history()` 在 `_messages()` 里负责，两者互不干扰。
+        """
+        text = (question or "").strip()
+        if self.context is None:
+            return text
+        try:
+            history = self.context.history()
+        except Exception:
+            return text
+        recent = []
+        for item in history:
+            if item.get("role") != "user":
+                continue
+            content = str(item.get("content") or "").strip()
+            if content:
+                recent.append(content[:self.SEARCH_HISTORY_CHARS])
+        if not recent:
+            return text
+        return " ".join(recent[-self.SEARCH_HISTORY:] + [text])
 
     # ---------- 给模型的消息 ----------
 
@@ -41,7 +98,7 @@ class ConsultAgent(BaseAgent):
             v["name"] + "（" + v["department"] + "）" for v in scenario["items"].values()
         )
 
-    def _messages(self, question, scenario):
+    def _messages(self, question, scenario, chunks=()):
         # 材料在场景配置里存的是 id，喂给模型前必须转成中文名（见 docs/08 文案规范）
         materials = "、".join(material_names(scenario, scenario.get("base_materials") or []))
         system = (
@@ -51,15 +108,26 @@ class ConsultAgent(BaseAgent):
             "办理事项：" + self._item_text(scenario) + "。"
             "基础材料：" + (materials or "以办事指南为准") + "。"
         )
-        return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ]
+        if chunks:
+            # 检索到的指南片段作为作答依据；提醒它别把片段原样倒出来
+            system += ("\n\n【办事指南节选（作答依据，请用自己的话回答，不要照抄）】\n"
+                       + format_chunks(chunks))
+        messages = [{"role": "system", "content": system}]
+        # 多轮上下文：带上本会话之前的问答，用户才能说"那第二个呢"这种省略句。
+        # 当前问题此时还没写进 history（answer() 在拿到回复后才记），所以不会重复。
+        history = self.context.history() if self.context is not None else []
+        messages += history[-self.MAX_HISTORY:]
+        messages.append({"role": "user", "content": question or ""})
+        return messages
 
     # ---------- 本地兜底：离线或模型失败时，按问题给固定人话 ----------
 
-    def _local_reply(self, question, scenario):
-        return self._compose(question or "", scenario)
+    def _local_reply(self, question, scenario, chunks=()):
+        reply = self._compose(question or "", scenario)
+        if chunks:
+            # 让离线兜底也带上检索依据，否则"接了知识库"在离线时看不出任何变化
+            reply += "\n\n（来自办事指南）\n" + format_chunks(chunks)
+        return reply
 
     def _compose(self, question, scenario):
         text = question or ""

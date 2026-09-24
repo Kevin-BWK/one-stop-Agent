@@ -8,7 +8,6 @@
 桩阶段直接写本地磁盘，真实阶段把 `add_file` 换成对象存储上传即可，
 接口与调用方（`MaterialService`）都不用改。
 """
-import json
 import time
 import uuid
 from pathlib import Path
@@ -16,6 +15,8 @@ from typing import Dict, List, Optional
 
 from ..config import ROOT
 from ..models.schema import MaterialFile, MaterialIntake
+from ..storage.atomic import read_json, write_json
+from ..storage.ids import IdAllocator, InMemoryIdAllocator, sequence_of
 from .spec import FILE_NEED_FIX, ext_of
 
 RUNTIME_DIR = ROOT / "data" / "runtime"
@@ -28,45 +29,41 @@ def _now() -> str:
 
 
 class MaterialStore:
-    """材料收集单与上传文件的读写。"""
+    """材料收集单与上传文件的读写。
 
-    def __init__(self, intakes_file=None, materials_dir=None):
+    单号由 `IdAllocator` 生成（见 `app/storage/ids.py`）：进程内实现用于 Demo，
+    落盘 / 数据库实现用于多进程——生产把 `add_file` 换成对象存储上传即可，
+    接口与调用方（`MaterialService`）都不用改。
+    """
+
+    def __init__(self, intakes_file=None, materials_dir=None, ids: IdAllocator = None):
         self.intakes_file = Path(intakes_file) if intakes_file else INTAKES_FILE
         self.materials_dir = Path(materials_dir) if materials_dir else MATERIALS_DIR
+        self.ids = ids if ids is not None else InMemoryIdAllocator()
         self._intakes: Dict[str, MaterialIntake] = {}
-        self._seq = 0
         self._load()
 
     # ---------- 收集单 ----------
 
-    @staticmethod
-    def _seq_of(intake_id: str) -> int:
-        suffix = intake_id[2:] if intake_id.startswith("CL") else ""
-        return int(suffix) if suffix.isdigit() else 0
-
     def _load(self):
-        if not self.intakes_file.exists():
-            return
-        try:
-            data = json.loads(self.intakes_file.read_text(encoding="utf-8"))
-        except ValueError:
-            return
+        data = read_json(self.intakes_file, {}) or {}
         for item in data.get("intakes") or []:
-            intake = MaterialIntake.from_dict(item)
+            try:
+                intake = MaterialIntake.from_dict(item)
+            except (KeyError, TypeError, ValueError):
+                continue
             self._intakes[intake.intake_id] = intake
-        self._seq = max([self._seq_of(key) for key in self._intakes] or [0])
+        # 对齐历史最大号，避免重启后重号
+        self.ids.reserve("CL", max([sequence_of(key) for key in self._intakes] or [0]))
 
     def _save(self):
-        self.intakes_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"intakes": [item.to_dict() for item in self._intakes.values()]}
-        self.intakes_file.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        write_json(self.intakes_file,
+                   {"intakes": [item.to_dict() for item in self._intakes.values()]})
 
-    def create(self, scenario_id: str, form, items, materials, notes) -> MaterialIntake:
-        self._seq += 1
+    def create(self, scenario_id: str, form, items, materials, notes,
+               owner_id: str = "") -> MaterialIntake:
         intake = MaterialIntake(
-            intake_id="CL" + str(self._seq).zfill(4),
+            intake_id=self.ids.next("CL", 4),
             scenario_id=scenario_id,
             form=form,
             items=list(items),
@@ -75,6 +72,7 @@ class MaterialStore:
             files={},
             created_at=_now(),
             updated_at=_now(),
+            owner_id=owner_id,
         )
         self._intakes[intake.intake_id] = intake
         self._save()

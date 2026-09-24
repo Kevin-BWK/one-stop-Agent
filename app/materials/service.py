@@ -12,35 +12,48 @@ from ..moma.context import SessionContext
 from ..models.schema import MaterialIntake
 from . import spec as spec_rule
 from .store import MaterialStore
-from .verify import check_file
+from .verify import build_checker, check_file
 
 
 class MaterialService:
-    """材料清单、上传、撤回的统一入口（HTTP 层与编排层共用）。"""
+    """材料清单、上传、撤回的统一入口（HTTP 层与编排层共用）。
 
-    def __init__(self, store: Optional[MaterialStore] = None, moma=None):
+    `url_signer(owner_id, intake_id, material_id, file_id)` 用于给每张材料生成
+    **绑定到文件的短时签名链接**（材料属敏感个人信息，见 `docs/10` 第 5 条）：
+    图片要直接作为 `<image src>` 使用，没法自定义请求头，只能把签名放进查询串。
+    不传时不带签名（离线 / 单测场景）。
+    """
+
+    def __init__(self, store: Optional[MaterialStore] = None, moma=None, checker=None,
+                 url_signer=None):
         self.store = store or MaterialStore()
         self.moma = moma or MoMAClient()
+        self.url_signer = url_signer
+        # 内容核验器：配了多模态模型就走视觉核验，否则用桩规则（见 app/materials/verify.py）
+        self.checker = checker or build_checker(
+            self.moma, model=self.moma.dispatch("verify"), role="sub")
 
     # ---------- 材料清单 ----------
 
-    def plan(self, scenario: Dict[str, Any], answers: Dict[str, Any]) -> MaterialIntake:
+    def plan(self, scenario: Dict[str, Any], answers: Dict[str, Any],
+             owner_id: str = "") -> MaterialIntake:
         """跑「信息采集 -> 条件判定」，产出材料清单并开一张材料收集单。"""
         context = SessionContext()
         form = CollectAgent(self.moma, context).collect(
             scenario["id"], scenario.get("collect_fields") or [], answers or {}
         )
         items, materials, notes = ConditionAgent(self.moma, context).evaluate(scenario, form)
-        return self.plan_from_form(scenario, form, items, materials, notes)
+        return self.plan_from_form(scenario, form, items, materials, notes, owner_id=owner_id)
 
     def plan_from_form(self, scenario: Dict[str, Any], form, items, materials,
-                       notes) -> MaterialIntake:
+                       notes, owner_id: str = "") -> MaterialIntake:
         """已有表单与判定结果时直接开收集单。
 
         多轮会话路径（`/api/chat` + `/api/fields`）逐项采集完就已经有表单了，
         不必再跑一遍信息采集与条件判定。
         """
-        return self.store.create(scenario["id"], form, list(items), list(materials), list(notes))
+        return self.store.create(scenario["id"], form, list(items), list(materials), list(notes),
+                                 owner_id=owner_id)
 
     def specs_of(self, scenario: Dict[str, Any], intake: MaterialIntake) -> list:
         return spec_rule.material_specs(scenario, intake.materials)
@@ -74,12 +87,17 @@ class MaterialService:
             "files": [self._file_view(intake, spec["id"], item) for item in files],
         }
 
-    @staticmethod
-    def _file_view(intake: MaterialIntake, material_id: str, record) -> Dict[str, Any]:
+    def _file_view(self, intake: MaterialIntake, material_id: str, record) -> Dict[str, Any]:
         data = record.to_dict()
-        data["url"] = (
-            "/api/materials/" + intake.intake_id + "/" + material_id + "/files/" + record.file_id
-        )
+        url = ("/api/materials/" + intake.intake_id + "/" + material_id
+               + "/files/" + record.file_id)
+        # 取文件要凭证：给每张图签一个绑定该文件的短时链接（图片直接当 src 用）
+        if self.url_signer is not None:
+            token = self.url_signer(intake.owner_id, intake.intake_id, material_id,
+                                    record.file_id)
+            if token:
+                url += "?token=" + token
+        data["url"] = url
         return data
 
     def brief(self, scenario: Dict[str, Any], intake: MaterialIntake) -> str:
@@ -98,7 +116,7 @@ class MaterialService:
         if reason:
             raise ValueError(reason)
 
-        verdict = check_file(spec, filename, content)
+        verdict = check_file(spec, filename, content, slot=slot, checker=self.checker)
         if verdict["result"] == "不通过":
             raise ValueError(verdict["reason"])
 

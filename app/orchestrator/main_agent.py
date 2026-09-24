@@ -143,22 +143,23 @@ class MainAgent:
 
     # ---------- 对外入口 ----------
 
-    def run(self, utterance, answers=None, on_event=None, intake=None):
+    def run(self, utterance, answers=None, on_event=None, intake=None, owner_id=""):
         """跑完整流程。on_event 可选（前端实时订阅用）；不传时行为与以往一致。
 
         `intake` 为材料收集单（见 app/materials）：传了就表示"材料已提交齐备"，
         跳过前四步，直接从「材料核验」续跑到办结。
+        `owner_id` 为办理单归属用户（多用户隔离，见 docs/12）。
         """
         answers = answers or {}
         try:
-            return self._run(utterance, answers, on_event, intake)
+            return self._run(utterance, answers, on_event, intake, owner_id)
         except Exception as exc:
             self._emit(on_event, ERROR, code=exc.__class__.__name__, message=str(exc))
             raise
 
-    def _run(self, utterance, answers, on_event, intake=None):
+    def _run(self, utterance, answers, on_event, intake=None, owner_id=""):
         if intake is not None:
-            return self._resume(intake, on_event)
+            return self._resume(intake, on_event, owner_id=owner_id)
 
         intent = route_intent(utterance)
         if intent == "query" and answers.get("case_id"):
@@ -174,7 +175,8 @@ class MainAgent:
 
         # 2. 咨询
         flow.start("consult")
-        self._log(trace, on_event, "咨询Agent", self.consult.answer(utterance, self.scenario))
+        self._log(trace, on_event, "咨询Agent",
+                  self.consult.answer(utterance, self.scenario, self.knowledge))
         self._complete(trace, flow, "consult", "已说明办理要点与材料", on_event=on_event)
 
         # 3. 信息采集
@@ -198,9 +200,10 @@ class MainAgent:
         self._log(trace, on_event, "材料核验Agent", self._describe_materials(materials))
         self._complete(trace, flow, "verify", "已确认材料要求", on_event=on_event)
 
-        return self._dispatch(trace, flow, items, materials, form, on_event)
+        return self._dispatch(trace, flow, items, materials, form, on_event,
+                              owner_id=owner_id)
 
-    def _resume(self, intake, on_event):
+    def _resume(self, intake, on_event, owner_id=""):
         """材料已提交齐备后，从「材料核验」续跑到办结。
 
         材料清单在受理前就已确认（存在 intake 里），因此这里不重跑
@@ -238,14 +241,15 @@ class MainAgent:
                        on_event=on_event)
 
         return self._dispatch(trace, flow, items, material_ids, intake.form, on_event,
-                              verify_report=dict(report))
+                              verify_report=dict(report), owner_id=owner_id)
 
-    def _dispatch(self, trace, flow, items, materials, form, on_event, verify_report=None):
+    def _dispatch(self, trace, flow, items, materials, form, on_event, verify_report=None,
+                  owner_id=""):
         """并联提交 -> 各部门办结 -> 进度落库（材料就绪后的公共尾段）。"""
         # 6. 并联提交：登记各部门事项节点，并联提交后由部门子 Agent 分别办理
         flow.start("submit")
         case = self.gov.submit(self.scenario["id"], items, materials, form,
-                               verify_report=verify_report)
+                               verify_report=verify_report, owner_id=owner_id)
         for item_id in items:
             flow.add_node(item_id, self.scenario["items"].get(item_id, {}).get("name", item_id), before="track")
         self._log(trace, on_event, "主Agent", self._describe_submit(case, items))
@@ -284,5 +288,7 @@ class MainAgent:
         if case is None:
             self._log(trace, on_event, "进度Agent", "未找到办理单 " + str(case_id) + "，请核对单号。")
             return trace, None
-        self._log(trace, on_event, "进度Agent", "当前进度：\n" + self._board(case))
+        # 结构化看板只给 CLI / 进度看板；推给对话区的必须是自然语言（见 docs/08 文案规范）
+        trace.append(("办理进度看板", self._board(case)))
+        self._log(trace, on_event, "进度Agent", self._describe_progress(case))
         return trace, case

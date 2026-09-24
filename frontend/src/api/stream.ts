@@ -3,9 +3,14 @@
  *
  * - H5（调试端）：EventSource（SSE）→ `GET /apply`
  * - App（成品端）：uni.connectSocket（WebSocket）→ `/ws/apply`
+ *
  * 两端事件负载完全一致（Event.to_dict() 的 JSON）。
+ * 通道选择与地址解析都在 `./platform`（**App 的 WebView 里也有 `EventSource`**，
+ * 不能靠运行时探测判断平台，见该文件开头）。
  */
 import type { OutboundEvent } from '@/types/contract'
+
+import { apiUrl, isH5, wsUrl } from './platform'
 
 export interface ApplyPayload {
   scenario_id: string
@@ -25,10 +30,6 @@ export interface StreamHandlers {
 const EVENT_TYPES = ['message', 'flow_node', 'case_created', 'item_done', 'finished', 'error']
 
 const TERMINAL = ['finished', 'error']
-
-export function isH5(): boolean {
-  return typeof window !== 'undefined' && typeof (window as any).EventSource !== 'undefined'
-}
 
 /** H5：SSE */
 function subscribeBySse(payload: ApplyPayload, handlers: StreamHandlers) {
@@ -58,7 +59,7 @@ function subscribeBySse(payload: ApplyPayload, handlers: StreamHandlers) {
     }
   }
 
-  source = new EventSource('/apply?' + query.toString())
+  source = new EventSource(apiUrl('/apply?' + query.toString()))
   source.onopen = () => handlers.onOpen && handlers.onOpen()
   source.onerror = () => {
     if (!closed) {
@@ -95,9 +96,8 @@ type SocketTask = {
 
 /** App：WebSocket */
 function subscribeBySocket(payload: ApplyPayload, handlers: StreamHandlers) {
-  const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://'
   const task = uni.connectSocket({
-    url: scheme + location.host + '/ws/apply'
+    url: wsUrl('/ws/apply')
   }) as unknown as SocketTask
 
   let closed = false

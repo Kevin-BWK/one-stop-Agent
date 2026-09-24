@@ -1,6 +1,12 @@
 /**
- * 前后端契约类型：与 app/orchestrator/events.py 的事件负载、
- * scenarios/*.json 的场景配置保持一致（见 docs/07）。
+ * 前后端契约类型（前端侧）。
+ *
+ * 契约的**服务端定义**在 `server/schemas.py`（Pydantic 响应模型 + 路由的 `response_model`），
+ * 事件负载来自 `app/orchestrator/events.py`，场景配置来自 `scenarios/*.json`。
+ *
+ * 两侧一致性由 `tests/test_openapi_contract.py` 守着：它拿后端 OpenAPI schema
+ * 校验「本文件用到的字段，后端模型里都有」——后端改字段名会让那个测试失败，
+ * 而不是让这里静默坏掉（见 docs/07）。
  */
 
 export type FlowStatus = '待办' | '进行中' | '已完成'
@@ -74,6 +80,21 @@ export interface CollectField {
   type: 'text' | 'enum' | 'number' | 'bool'
   options?: string[]
   required?: boolean
+}
+
+/**
+ * 条件判定实时预判（POST /api/preview）。
+ *
+ * 按**目前填了多少**预估要办的事与要交的材料；只读、无副作用。
+ * 信息采齐后会产出正式清单（`intake_id`），此时两者一致。
+ */
+export interface ConditionPreview {
+  items: string[]
+  item_names: string[]
+  materials: string[]
+  material_names: string[]
+  /** 命中条件规则的说明（为什么多出这几项） */
+  notes: string[]
 }
 
 /** 用户已提交的单个文件（材料区渲染缩略图用） */

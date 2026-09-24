@@ -101,6 +101,26 @@ function onBool(key: string, event: any) {
       <view v-if="store.missingFields.length" class="form__hint">
         <text>还有 {{ store.missingFields.length }} 项必填未填：{{ missingText }}</text>
       </view>
+
+      <!-- 条件判定实时预判：按目前填了多少，预估要办的事与要交的材料（只读） -->
+      <view v-if="store.preview" class="preview">
+        <text class="preview__title">
+          根据目前填写的信息，预计要办 {{ store.preview.item_names.length }} 件事、交
+          {{ store.preview.material_names.length }} 份材料
+        </text>
+        <text class="preview__line">事项：{{ store.preview.item_names.join('、') }}</text>
+        <text class="preview__line">材料：{{ store.preview.material_names.join('、') }}</text>
+        <text v-if="store.preview.notes.length" class="preview__line">
+          其中：{{ store.preview.notes.join('；') }}
+        </text>
+        <text class="preview__tip">
+          {{
+            store.intakeId
+              ? '以上是最终清单，请在材料区提交。'
+              : '这是按目前信息预判的结果，填完后会给出最终清单。'
+          }}
+        </text>
+      </view>
     </view>
   </view>
 </template>
@@ -224,5 +244,37 @@ function onBool(key: string, event: any) {
   background: #fffbeb;
   border: 1px solid #fde68a;
   border-radius: 8px;
+}
+
+.preview {
+  margin-top: 10px;
+  padding: 9px 11px;
+  background: #f6f9ff;
+  border: 1px solid #dbe6fb;
+  border-radius: 8px;
+}
+
+.preview__title {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  color: #1f4fa8;
+}
+
+.preview__line {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #4b5563;
+}
+
+.preview__tip {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #9aa4b2;
 }
 </style>

@@ -81,15 +81,20 @@ def main():
         assert t["intent"] == "consult", t
 
         # 2) 多轮采集：字段填完应产出材料清单，而**不是**直接受理
+        #    （规则矩阵见 tests/test_condition_routing.py，这里只做集成冒烟）
         sid, t = collect(svc, "restaurant_open", RESTAURANT, "我想开一家牛肉面馆")
         assert t["intake_id"].startswith("CL"), t
         assert t.get("case") is None, "字段采齐后不该直接受理"
-        assert "D_signboard" in t["items"], t["items"]
-        assert "C_fire" not in t["items"], t["items"]
+        assert "D_signboard" in t["items"], t["items"]      # 正向：设了招牌
+        assert "C_fire" not in t["items"], t["items"]       # 反向：80 平米
+        # 实时预判：采齐后应与正式清单一致（同一套纯函数算出来的）
+        assert t["preview"]["items"] == t["items"], t["preview"]
+        assert t["preview"]["materials"] == t["materials"], t["preview"]
 
         view = t["material_view"]
         names = [m["name"] for m in view["materials"]]
-        assert "油烟净化设施证明" in names, names       # 热食 -> 条件加材料
+        # 本层特有的集成点：条件判定结果 -> 材料清单，且 id 已转成中文名
+        assert "油烟净化设施证明" in names, names
         assert view["summary"] == {"total": 4, "passed": 0, "ready": False}, view["summary"]
         for material in view["materials"]:
             assert material["reason"] and material["form"], material   # 必须告诉用户为什么、怎么给
@@ -129,15 +134,19 @@ def main():
         again = svc.handle_message(sid, "开始办理")
         assert again["intake_id"] == t["intake_id"], again
 
-        # 8) 企业场景（预约开户 + 10 人 -> 用工备案）
+        # 8) 多轮上下文：咨询问答要记进会话历史（下次提问才会带上）
+        history_before = len(svc.context_of(sid).history())
+        t = svc.handle_message(sid, "需要什么材料？")
+        assert t["intent"] == "consult", t
+        history = svc.context_of(sid).history()
+        assert len(history) == history_before + 2, history          # 一问一答
+        assert history[-2]["role"] == "user", history
+        assert history[-1]["role"] == "assistant", history
+
+        # 9) 企业场景也走一遍（证明换场景、换答案都能跑通）
         _, te = collect(svc, "enterprise_open", ENTERPRISE, "我想注册一家科技公司")
         assert "D_bank" in te["items"], te["items"]
-        assert "labor_filing" in te["materials"], te["materials"]
         assert len(te["material_view"]["materials"]) == 4, te["material_view"]["summary"]
-
-        # 9) 大面积 -> 触发消防（不触发时不该出现）
-        _, tb = collect(svc, "restaurant_open", dict(RESTAURANT, area_sqm=500), "我想开一家大烧烤店")
-        assert "C_fire" in tb["items"], tb["items"]
 
         print("SERVER SMOKE PASSED")
     finally:

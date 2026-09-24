@@ -147,6 +147,72 @@ def test_consult_agent_wiring():
     assert sent[0]["role"] == "system" and "开办餐饮店" in sent[0]["content"]
 
 
+def test_complete_accepts_multimodal_content():
+    """多模态消息（content 为数组：文本 + 图片）要能发出、能解析——材料视觉核验依赖它。"""
+    messages = [
+        {"role": "system", "content": "你是材料审核助手"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "这是身份证正面吗"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}},
+        ]},
+    ]
+
+    session = FakeSession([ok("看了")])
+    client = MoMAClient(api_base="https://x/v1", api_key="k", session=session, sleep=no_sleep)
+    assert client.complete("qwen-vl", messages, fallback="FB") == "看了"
+    sent = session.calls[0]["json"]["messages"]
+    assert isinstance(sent[1]["content"], list), sent          # 原样发出去，没有被压平
+
+    # 桩模式：不给 fallback 时走 _stub，多模态的数组 content 不能让它崩
+    stub = MoMAClient(api_base="", api_key="")
+    assert stub.complete("qwen-vl", messages, fallback="FB") == "FB"
+    assert stub.complete("qwen-vl", messages) == "[qwen-vl] 这是身份证正面吗"
+
+
+def test_consult_agent_multi_turn_context():
+    """多轮上下文：本会话之前的问答要进入发给模型的消息（见 docs/08）。"""
+    context = SessionContext()
+    context.add_history("user", "开餐饮店要交什么材料")
+    context.add_history("assistant", "要交身份证、经营场所证明。")
+
+    session = FakeSession([ok("第二个问题的回答")])
+    agent = ConsultAgent(
+        MoMAClient(api_base="https://x/v1", api_key="k", session=session, sleep=no_sleep),
+        context,
+    )
+    assert agent.answer("那第二个呢", SCENARIO) == "第二个问题的回答"
+
+    sent = session.calls[0]["json"]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"], sent
+    assert sent[1]["content"] == "开餐饮店要交什么材料", sent
+    assert sent[-1]["content"] == "那第二个呢", sent        # 当前问题在最后，且不重复
+    # 本轮问答也要记进历史，供下一轮使用
+    assert context.history()[-2:] == [
+        {"role": "user", "content": "那第二个呢"},
+        {"role": "assistant", "content": "第二个问题的回答"},
+    ], context.history()
+
+
+def test_consult_agent_history_is_capped():
+    """历史过长时只带最近若干条，避免请求无限膨胀、模型被早期内容带偏。"""
+    context = SessionContext()
+    for index in range(20):
+        context.add_history("user", "问题" + str(index))
+        context.add_history("assistant", "回答" + str(index))
+
+    session = FakeSession([ok("ok")])
+    agent = ConsultAgent(
+        MoMAClient(api_base="https://x/v1", api_key="k", session=session, sleep=no_sleep),
+        context,
+    )
+    agent.answer("最后的问题", SCENARIO)
+
+    sent = session.calls[0]["json"]["messages"]
+    assert len(sent) == 1 + ConsultAgent.MAX_HISTORY + 1, len(sent)
+    assert sent[0]["role"] == "system"
+    assert sent[-1]["content"] == "最后的问题"
+
+
 def main():
     test_stub_mode()
     test_live_mode_parse_openai()
@@ -155,7 +221,10 @@ def main():
     test_4xx_no_retry_and_fallback()
     test_bad_json_raises()
     test_model_env_override()
+    test_complete_accepts_multimodal_content()
     test_consult_agent_wiring()
+    test_consult_agent_multi_turn_context()
+    test_consult_agent_history_is_capped()
     print("MOMA TESTS PASSED")
 
 

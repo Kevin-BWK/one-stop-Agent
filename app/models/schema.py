@@ -36,6 +36,8 @@ class CaseRecord:
     flow: List[Dict[str, str]] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    # 办理单归属的用户（多用户隔离；空串表示历史 / 演示数据）
+    owner_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -49,6 +51,7 @@ class CaseRecord:
             "flow": [dict(node) for node in self.flow],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "owner_id": self.owner_id,
         }
 
     @classmethod
@@ -64,6 +67,7 @@ class CaseRecord:
             flow=[dict(node) for node in (data.get("flow") or [])],
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
+            owner_id=data.get("owner_id", ""),
         )
 
 
@@ -127,6 +131,8 @@ class MaterialIntake:
     files: Dict[str, List[MaterialFile]] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
+    # 材料收集单归属的用户（材料属敏感个人信息，读取必须校验归属）
+    owner_id: str = ""
 
     def files_of(self, material_id: str) -> List[MaterialFile]:
         return list(self.files.get(material_id) or [])
@@ -145,6 +151,7 @@ class MaterialIntake:
             },
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "owner_id": self.owner_id,
         }
 
     @classmethod
@@ -162,4 +169,5 @@ class MaterialIntake:
             files=files,
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
+            owner_id=data.get("owner_id", ""),
         )
