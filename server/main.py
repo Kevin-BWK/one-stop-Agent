@@ -13,8 +13,9 @@ from fastapi.responses import StreamingResponse
 from app.orchestrator.preview import build_preview
 
 from .materials import build_router
-from .schemas import (ApplyRequest, AskRequest, FieldSubmitRequest,
-                      MessageRequest, PreviewRequest, SessionCreateRequest)
+from .schemas import (ApplyRequest, AskRequest, AskResponse, CaseOut, FieldSubmitRequest,
+                      HealthOut, MessageRequest, PreviewOut, PreviewRequest, ScenarioOut,
+                      SessionCreateRequest, TurnResponse)
 from .service import AgentService
 from .stream import (answer_question, iter_events, load_case, load_intake,
                      load_scenario, material_gate, missing_required, sse_stream)
@@ -48,25 +49,25 @@ def create_app() -> FastAPI:
         return lambda case: service.attach_case(session_id, case)
 
 
-    @app.get("/health")
+    @app.get("/health", response_model=HealthOut)
     def health():
         return {"status": "ok", "moma": service.moma.mode()}
 
-    @app.post("/api/session")
+    @app.post("/api/session", response_model=TurnResponse)
     def create_session(req: SessionCreateRequest):
         try:
             return service.create_session(req.scenario_id)
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
-    @app.post("/api/chat")
+    @app.post("/api/chat", response_model=TurnResponse)
     def chat(req: MessageRequest):
         try:
             return service.handle_message(req.session_id, req.message)
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
-    @app.post("/api/fields")
+    @app.post("/api/fields", response_model=TurnResponse)
     def submit_field(req: FieldSubmitRequest):
         try:
             return service.submit_field(req.session_id, req.key, req.value)
@@ -75,7 +76,7 @@ def create_app() -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    @app.get("/api/cases/{case_id}")
+    @app.get("/api/cases/{case_id}", response_model=CaseOut)
     def get_case(case_id: str):
         # 事件流办理单落盘在 data/runtime/cases.json；多轮会话办理单在 service 内存里
         case = load_case(case_id)
@@ -85,7 +86,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="办理单不存在")
         return case
 
-    @app.get("/api/sessions/{session_id}")
+    @app.get("/api/sessions/{session_id}", response_model=TurnResponse)
     def get_session(session_id: str):
         try:
             return service.get_session(session_id)
@@ -95,14 +96,14 @@ def create_app() -> FastAPI:
     # ---------- 前端事件流（一次性提交并开始办理）----------
     # App（成品端）：WebSocket；H5（调试端）：SSE。两端事件负载格式一致。
 
-    @app.get("/scenarios/{scenario_id}")
+    @app.get("/scenarios/{scenario_id}", response_model=ScenarioOut)
     def get_scenario(scenario_id: str):
         scenario = load_scenario(scenario_id)
         if scenario is None:
             raise HTTPException(status_code=404, detail="场景不存在")
         return scenario
 
-    @app.post("/api/preview")
+    @app.post("/api/preview", response_model=PreviewOut)
     def preview(req: PreviewRequest):
         """条件判定实时预判：按当前（可能还不完整的）表单预估事项与材料。
 
@@ -113,7 +114,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="场景不存在")
         return build_preview(scenario, req.answers)
 
-    @app.post("/api/ask")
+    @app.post("/api/ask", response_model=AskResponse)
     def ask(req: AskRequest):
         """对话区提问：返回自然语言回答（咨询意图）。
 

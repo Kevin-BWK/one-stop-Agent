@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse
 from app.materials.service import MaterialService
 from app.materials.store import get_store
 
-from .schemas import IntakeRequest
+from .schemas import IntakeRequest, MaterialViewOut
 
 
 def build_router(service: Optional[MaterialService] = None) -> APIRouter:
@@ -45,7 +45,7 @@ def build_router(service: Optional[MaterialService] = None) -> APIRouter:
         payload["message"] = message
         return payload
 
-    @router.post("/intake")
+    @router.post("/intake", response_model=MaterialViewOut)
     def create_intake(req: IntakeRequest):
         """按申请信息判定所需材料，开一张材料收集单。"""
         from .stream import load_scenario, missing_required
@@ -62,13 +62,13 @@ def build_router(service: Optional[MaterialService] = None) -> APIRouter:
                 "材料没通过前无法受理。")
         return _payload(scenario, intake, message=head + "\n\n" + material_service.brief(scenario, intake))
 
-    @router.get("/{intake_id}")
+    @router.get("/{intake_id}", response_model=MaterialViewOut)
     def get_intake(intake_id: str):
         intake = _intake_or_404(intake_id)
         scenario = _scenario_of(intake_id, intake)
         return _payload(scenario, intake)
 
-    @router.post("/{intake_id}/{material_id}/files")
+    @router.post("/{intake_id}/{material_id}/files", response_model=MaterialViewOut)
     async def upload_file(intake_id: str, material_id: str,
                           file: UploadFile = File(...), slot: str = Form("")):
         intake = _intake_or_404(intake_id)
@@ -85,7 +85,7 @@ def build_router(service: Optional[MaterialService] = None) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-    @router.delete("/{intake_id}/{material_id}/files/{file_id}")
+    @router.delete("/{intake_id}/{material_id}/files/{file_id}", response_model=MaterialViewOut)
     def remove_file(intake_id: str, material_id: str, file_id: str):
         intake = _intake_or_404(intake_id)
         scenario = _scenario_of(intake_id, intake)

@@ -106,6 +106,7 @@ python tests/test_materials.py          # 材料层：清单 / 槽位 / 核验�
 python tests/test_moma_client.py        # 模型层：MoMA 桩/真实、重试与降级（离线）
 python tests/test_server_smoke.py       # 服务层：多轮会话闭环（零第三方依赖）
 python tests/test_api_e2e.py            # 接口层：端到端 HTTP + 异常分支
+python tests/test_openapi_contract.py   # 契约层：后端 OpenAPI ↔ 前端 contract.ts（响应模型 / 字段一致）
 
 # 启动 API（需先 pip install -r requirements.txt）
 uvicorn server.main:app --reload

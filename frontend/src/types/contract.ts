@@ -1,6 +1,12 @@
 /**
- * 前后端契约类型：与 app/orchestrator/events.py 的事件负载、
- * scenarios/*.json 的场景配置保持一致（见 docs/07）。
+ * 前后端契约类型（前端侧）。
+ *
+ * 契约的**服务端定义**在 `server/schemas.py`（Pydantic 响应模型 + 路由的 `response_model`），
+ * 事件负载来自 `app/orchestrator/events.py`，场景配置来自 `scenarios/*.json`。
+ *
+ * 两侧一致性由 `tests/test_openapi_contract.py` 守着：它拿后端 OpenAPI schema
+ * 校验「本文件用到的字段，后端模型里都有」——后端改字段名会让那个测试失败，
+ * 而不是让这里静默坏掉（见 docs/07）。
  */
 
 export type FlowStatus = '待办' | '进行中' | '已完成'
