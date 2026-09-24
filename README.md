@@ -168,7 +168,9 @@ dev.bat -Stop               # 停止前后端
 | `finished` | 最终 `flow` / `item_status` | 结束态 |
 | `error` | `code` / `message` | 提示并恢复界面 |
 
-> 说明：**前端尚未实现**；其依赖的编排事件出口（`MainAgent.run / query` 的可选 `on_event` 回调，`Event.to_dict()` 可直接序列化为事件 JSON）已就绪，服务层推送即可（App: WebSocket；H5: SSE）。完整的工程结构、事件契约与接口定义见 `docs/07-前端交互设计.md`。
+> 说明：**前端（uni-app）H5 调试端已实现**——聊天 + 动态表单 + 材料区 + 进度看板，H5 走 SSE、App 走 WebSocket（同一份代码，见 `frontend/src/api/stream.ts`）。
+> **App 成品端打包待做**（WebSocket 通道、相机权限等衔接问题见 `docs/10-App打包前检查清单.md`）。
+> 完整的事件契约与接口定义见 `docs/07-前端交互设计.md`。
 
 ## MoMA 真实接入
 
@@ -228,6 +230,8 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - 办理进度可推进：流程节点逐个“打勾”（意图识别 → … → 进度跟踪），并联事项由各部门事项子 Agent 办结后回调主 Agent 自动打勾，支持按单号查询进度看板。
 - 材料提交与核验：材料条目化（含“为什么交 / 怎么给 / 格式 / 槽位”），支持拍照 / 相册 / 选文件逐项上传，形式校验 + 桩内容核验，需补正可原地重传，必交材料全部通过才允许并联提交（见 `docs/09`）。
 - 受理入口统一：表单式（`/apply`）与对话式（`/api/session` + `/api/chat` + `/api/fields`）两条路径**共用同一套 `MainAgent` 编排与材料提交**；多轮会话只负责采集与材料清单，不再自行受理（见 `docs/09`）。
+- 对话式办理：聊天区可输入、随时插问；提问走会话（`ensureSession()` + `/api/ask` 带 `session_id`），服务端按会话记住问答，最近 3 轮历史带进模型上下文（见 `docs/08`）。
+- 文案自然语言化：结构化进度看板只进 CLI / 进度看板，**推给对话区的都是自然语言**；材料与事项一律用中文名，不出现 JSON 字面量、内部 id、模型名（见 `docs/08`）。
 - 编排事件出口：`MainAgent.run / query` 支持可选 `on_event` 回调（`app/orchestrator/events.py`），不传时行为完全不变，为 uni-app 前端实时刷新进度预留。
 - 配置化条件路由：面积、油烟、生食/冷食、招牌、银行开户、用工人数等按规则增减事项与材料。
 - MoMA 三大能力落点（多模型调度 / 智能路由 / 上下文管理）：支持桩 / 真实一键切换（配置 `MOMA_API_BASE` / `MOMA_API_KEY` 即走真实，见「MoMA 真实接入」）。
@@ -255,7 +259,8 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] README / 设计文档 / GitHub 发布
 - [x] FastAPI 服务层 + 多轮会话改造
 - [x] MoMA 真实 API 接入
-- [ ] 前端（uni-app：App（成品） / H5（测试用），协作 · 以 Anjie 为主）
+- [x] 前端 H5 调试端（uni-app：Vue 3 + TypeScript，协作 · 以 Anjie 为主）
+- [ ] 前端 App 成品端打包（WebSocket 通道 + 权限声明，协作 · 以 Anjie 为主）
 
 #### Anjie（组员）· 场景与业务
 
@@ -266,7 +271,8 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] 冒烟测试
 - [x] 进度状态推进（流程节点打勾 + 部门子 Agent 办结回调 + 编排事件出口）
 - [x] 材料提交与核验（材料清单 / 逐项上传与核验 / 补正闭环 / 受理前置校验，见 `docs/09`）
-- [ ] 前端（uni-app，Vue 3 + TypeScript，App（成品） / H5（测试用），主负责 · Kevin 协作）
+- [x] 前端 H5 调试端（uni-app，Vue 3 + TypeScript，主负责 · Kevin 协作）
+- [ ] 前端 App 成品端打包（WebSocket 通道 + 权限声明，主负责 · Kevin 协作）
 - [ ] 向量化知识库与 RAG
 - [ ] 多模态材料核验（VerifyAgent 逻辑，MoMA 调度与 Kevin 协作）
 
@@ -274,10 +280,11 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 
 - [x] 双场景骨架 + 完整编排闭环 + 条件路由
 - [x] 进度状态推进（让“办理进度”可变化）
-- [ ] uni-app 前端（Vue 3 + TypeScript，App（成品） / H5（测试用）：聊天 + 动态表单 + 进度看板，事件推送，见「前端交互设计」）
-- [ ] 对话式办理（聊天区可输入、多轮上下文、随时插问，见 `docs/08`）
+- [x] uni-app 前端 H5 调试端（聊天 + 动态表单 + 材料区 + 进度看板，SSE 事件推送，见「前端交互设计」）
+- [ ] uni-app App 成品端打包（WebSocket 推送 + 相机/相册权限等，见 `docs/10-App打包前检查清单.md`）
+- [x] 对话式办理（聊天区可输入、随时插问；提问走会话带多轮上下文，见 `docs/08`）
 - [x] 材料提交与核验（材料清单 + 逐项上传核验 + 补正闭环 + 受理前置校验，见 `docs/09`）
-- [ ] 提交前置校验 + 文案自然语言化（去掉 JSON 字面量与内部 id，见 `docs/08`）
+- [x] 提交前置校验 + 文案自然语言化（去 JSON 字面量与内部 id；结构化看板只进 CLI，对话区只收自然语言，见 `docs/08`）
 - [x] MoMA 真实 API 接入（桩/真实一键切换，主/子双角色）
 - [ ] 向量化知识库与 RAG 检索
 - [ ] 多模态材料核验
