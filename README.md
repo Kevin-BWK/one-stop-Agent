@@ -69,7 +69,8 @@ one-stop-agent/
 │   ├── knowledge/           # 知识检索
 │   ├── mock_gov/            # 政务系统 Mock（并联办理与状态推进）
 │   ├── models/              # 数据模型
-│   └── storage/             # 存储（内存 / JSON 文件）
+│   ├── auth/                # 多用户鉴权（用户 / 口令哈希 / 令牌 / RBAC，见 docs/12）
+│   └── storage/             # 存储抽象与装配（接口 / 内存 / JSON / 原子写 / 发号器）
 └── tests/                   # 冒烟测试
 ```
 
@@ -103,6 +104,7 @@ python tests/test_knowledge_vector.py   # 检索层（向量）：Embedding 客�
 python tests/test_knowledge_eval.py     # 检索层（评估）：12 条标注用例的 recall@1 / recall@k / MRR 回归门槛
 python tests/test_flow.py               # 编排层：MainAgent 闭环 + 流程节点 + 事件
 python tests/test_materials.py          # 材料层：清单 / 槽位 / 核验（含视觉核验与降级）/ 补正 / 撤回 / 受理拦截
+python tests/test_auth.py               # 安全层：口令 / 令牌 / 多用户隔离 / 材料越权 / 文件签名链接（见 docs/12）
 python tests/test_moma_client.py        # 模型层：MoMA 桩/真实、重试与降级（离线）
 python tests/test_server_smoke.py       # 服务层：多轮会话闭环（零第三方依赖）
 python tests/test_api_e2e.py            # 接口层：端到端 HTTP + 异常分支
@@ -128,7 +130,8 @@ dev.bat -Stop               # 停止前后端
 | `app/moma/client.py` | ✅ 已支持真实 API（未配置环境变量时回退桩） | 配置 `MOMA_API_BASE` / `MOMA_API_KEY` 即启用 |
 | `app/knowledge/retriever.py` | ✅ 关键词基线 + 向量召回（RRF 融合；未配置自动降级，见 `docs/11`） | 配 `MOMA_EMBED_MODEL` 即启用向量；后续可换向量库（Milvus / pgvector）+ Cross-Encoder 精排 |
 | `app/mock_gov/services.py` | 本地内存模拟并联办理 | 对接真实政务系统 |
-| `app/storage/repo.py` | 内存 / JSON 文件（跨进程查询进度） | PostgreSQL / MySQL |
+| `app/storage/`（`base.py` 接口 + `factory.py` 装配） | 内存 / JSON 文件（跨进程查询进度）；会话 / 材料单 / 办理单 / 单号已按接口解耦，记 `owner_id` | Redis（会话）+ PostgreSQL / MySQL（办理单 / 用户）+ 数据库序列（单号）；`STORAGE_BACKEND=sql/redis` 注入实现即切换，业务代码零改动（见 `docs/12`） |
+| `app/auth/`（`models` / `security` / `service` / `store`） | 账号 + 口令哈希 + HMAC 自包含令牌 + RBAC；`AUTH_REQUIRED=1` 强制登录，默认关闭时按演示用户 | 接 HTTPS / 令牌吊销（`jti` 黑名单）/ 实名注册 / 审计日志（见 `docs/12`） |
 | `app/agents/consult_agent.py` | 拼固定话术 | MoMA 对话模型（见 `docs/08`） |
 | `app/agents/verify_agent.py` | 三级分工：形式校验（格式/体积）→ 本地规则（体积过小、**读文件头判分辨率**）→ 只有“是不是这份材料”才交 `qwen-vl`；模型不可用回落本地结论 | 更细的要素级校验（证号 / 有效期 / 与表单字段比对，见 `docs/09`） |
 | `app/agents/item_agent.py` | 直接返回“已办结” | 调用各部门政务系统，异步回调（见 `docs/06`） |
@@ -235,6 +238,33 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 
 > 未配置时自动回退桩模式；配置后无需修改任何业务代码。
 
+## 多用户与鉴权（见 `docs/12`）
+
+给多个真实用户使用前，服务端已从"单进程 + 内存状态 + 无鉴权"改造为**多用户架构**：
+
+- **数据归属**：会话 / 材料收集单 / 办理单都记 `owner_id`，接口按归属校验（RBAC：
+  办事人只能看自己的；工作人员可跨用户查已受理的办理单，读不到别人的会话草稿与材料）。
+- **账号与令牌**：`POST /api/auth/register` / `/api/auth/login` / `GET /api/auth/me`；
+  口令 PBKDF2 哈希（永不落明文），登录返回 HMAC 自包含令牌（服务端无状态校验，适配多进程）。
+- **材料接口鉴权**：清单 / 上传 / 撤回按归属校验；文件读取要么带**绑定到该文件的短时签名链接**
+  （`?token=`，图片可直接当 `<image src>`），要么带**归属人本人的登录令牌**。
+- **存储抽象（留出的数据库接口）**：`app/storage/base.py` 定义
+  `CaseRepo` / `SessionRepo` / `UserStore` / `IdAllocator` 四个接口，
+  `build_storage()` 是唯一切换点；`STORAGE_BACKEND=sql/redis` 目前只留接口，
+  注入实现即可切换，业务代码零改动。
+
+| 环境变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `AUTH_REQUIRED` | 关闭 | 置 `1` 强制登录；**默认关闭**，未登录请求按演示用户处理，单用户 Demo 行为不变 |
+| `AUTH_SECRET` | 开发自动生成 | 令牌签名密钥；生产**必须显式配置且各实例一致** |
+| `AUTH_TOKEN_TTL` / `AUTH_FILE_URL_TTL` | 7 天 / 10 分钟 | 登录令牌 / 材料文件签名链接有效期（秒） |
+| `STORAGE_BACKEND` | `json` | `memory` / `json` / `sql` / `redis` |
+| `INSTANCE_ID` | 空 | 多实例发号前缀（`YJS0001` → `YJSi0001`） |
+
+```bash
+python tests/test_auth.py    # 多用户隔离 / 越权 / 文件签名链接 / 兼容开关
+```
+
 ## 工作总结与分工
 
 ### 已完成工作
@@ -306,3 +336,4 @@ $env:MOMA_MAIN_API_KEY  = "<主密钥>"
 - [x] 知识检索基线（按问题检索指南片段：两级切分 + 字符 2-gram + 标题加权，零依赖，见 `docs/11`）
 - [x] 向量化检索（Embedding 召回 + 关键词 RRF 融合；配 `MOMA_EMBED_MODEL` 即启用，未配置自动降级，契约不变，见 `docs/11`）
 - [x] 多模态材料核验（视觉核验器：图片 + 提示词交 `qwen-vl` 判断是否合规件；模型不可用自动回落桩规则，见 `docs/09`）
+- [x] 多用户架构与材料接口鉴权（会话 / 材料 / 办理单记归属 + RBAC + 账号令牌 + 文件签名链接；存储抽象留出数据库 / Redis 接口，`STORAGE_BACKEND` 一键切换，见 `docs/12`）

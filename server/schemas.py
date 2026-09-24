@@ -87,6 +87,7 @@ class CaseOut(BaseModel):
 
     `form` 只在「按单号读已落盘办理单」（`GET /api/cases/{case_id}`）时出现；
     多轮会话内嵌的 case 不带 form（见 `server/service.py::_case_dict`）。
+    `owner_id` 为办理单归属用户，用于多用户隔离（见 `docs/12`）。
     """
     case_id: str
     scenario_id: str
@@ -97,6 +98,7 @@ class CaseOut(BaseModel):
     flow: List[dict] = []
     created_at: str
     updated_at: str = ""
+    owner_id: str = ""
     form: Optional[FormOut] = None
 
 
@@ -174,9 +176,45 @@ class ScenarioOut(BaseModel):
 
 
 class HealthOut(BaseModel):
-    """健康检查；`moma` 为模型客户端当前模式（live / stub）。"""
+    """健康检查；`moma` 为模型客户端当前模式（live / stub）。
+
+    `storage` 为当前存储后端、`auth_required` 为是否强制登录（见 `docs/12`）：
+    上线前用来一眼确认"跑的是不是多用户形态"，两者都不含任何密钥。
+    """
     status: str
     moma: str
+    storage: str = ""
+    auth_required: bool = False
+
+
+class RegisterRequest(BaseModel):
+    """注册办事账号。"""
+    username: str
+    password: str
+    display_name: str = ""
+
+
+class LoginRequest(BaseModel):
+    """账号口令登录。"""
+    username: str
+    password: str
+
+
+class UserOut(BaseModel):
+    """用户对外视图（**不含口令与哈希**）。"""
+    user_id: str
+    username: str
+    display_name: str = ""
+    role: str = "applicant"
+    created_at: str = ""
+
+
+class TokenOut(BaseModel):
+    """登录结果：自包含令牌 + 用户信息（客户端存 token，后续放 `Authorization`）。"""
+    token: str
+    token_type: str = "Bearer"
+    expires_in: int = 0
+    user: UserOut
 
 
 class AskResponse(BaseModel):

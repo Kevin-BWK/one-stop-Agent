@@ -26,6 +26,9 @@ CONTRACT_TS = ROOT / "frontend" / "src" / "types" / "contract.ts"
 # 应当返回 JSON 的路由（SSE / WebSocket / 文件流不在此列）
 JSON_ROUTES = (
     ("get", "/health"),
+    ("post", "/api/auth/register"),
+    ("post", "/api/auth/login"),
+    ("get", "/api/auth/me"),
     ("post", "/api/session"),
     ("post", "/api/chat"),
     ("post", "/api/fields"),
@@ -43,6 +46,9 @@ JSON_ROUTES = (
 # 路由 -> 期望绑定的响应模型（防止绑错模型）
 EXPECTED_MODELS = {
     ("get", "/health"): "HealthOut",
+    ("post", "/api/auth/register"): "UserOut",
+    ("post", "/api/auth/login"): "TokenOut",
+    ("get", "/api/auth/me"): "UserOut",
     ("post", "/api/session"): "TurnResponse",
     ("post", "/api/chat"): "TurnResponse",
     ("post", "/api/fields"): "TurnResponse",

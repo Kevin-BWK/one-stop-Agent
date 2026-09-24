@@ -1,7 +1,8 @@
 # 10 App 打包前检查清单
 
 > 状态：**H5 调试端已完成；App 端代码适配、依赖冲突与打包配置均已就绪，`npm run build:app` 已产出可导入 HBuilderX 的产物**。
-> 剩余：`appid` 需换成 DCloud 正式值（`__UNI__` 开头，当前用项目名占位）；真机打包需 HBuilderX；第 4/5 条是多用户上线前的事。
+> 剩余：`appid` 需换成 DCloud 正式值（`__UNI__` 开头，当前用项目名占位）；真机打包需 HBuilderX；
+> 多用户后端架构与材料接口鉴权（第 4/5 条）**后端已完成**（见 `docs/12`），前端登录界面尚未接入。
 > 本文记录打包前必须处理的衔接问题（按严重程度排序），每条都给了代码位置与修法。
 
 ## 0. 依赖冲突：App 构建直接失败 ✅ 已解决
@@ -115,28 +116,49 @@ App 端**没有代理**，相对路径会打到 WebView 自己的基址（`file:
 
 **已做**：`isH5()` 改用 uni-app **条件编译**（`// #ifdef H5`），不再靠 `window` / `EventSource` 探测。
 
-## 4. 服务端是"单进程 + 内存状态"，多用户会出问题
+## 4. 服务端是"单进程 + 内存状态"，多用户会出问题 ✅ 已解决（后端）
 
-现在是**单用户 Demo 架构**，给多个 App 用户用之前必须换掉：
+**原问题**：单用户 Demo 架构，给多个 App 用户用之前必须换掉：
 
-| 位置 | 状态 | 后果 |
+| 位置 | 原状态 | 后果 |
 | --- | --- | --- |
 | `app/mock_gov/services.py::MockGovServices._seq` | 进程内自增，**无锁** | 并发提交会重号 |
 | `server/service.py::AgentService.sessions` | 进程内 dict | `uvicorn --workers 4` 时会话互相找不到 |
 | `app/materials/store.py::MaterialStore._intakes` | 进程内 dict + JSON 文件 | 同上 |
 | `app/storage/repo.py::JsonFileRepo` | 整文件读写 | 多进程同时写会互相覆盖 |
 
-**修法**：会话与材料收集单进 Redis，办理单进 PostgreSQL/MySQL，单号改成数据库序列或带实例号。
-README 的"桩实现 → 真实接入"表里已经许了这件事，这里是它的**硬门槛**。
+**已做**（详见 `docs/12`）：
 
-## 5. 材料文件接口没有鉴权
+- **存储抽象**：`app/storage/base.py` 定义 `CaseRepo` / `SessionRepo` / `UserStore` / `IdAllocator`
+  四个接口，内存与 JSON 实现已就绪；`app/storage/factory.py::build_storage()` 是唯一切换点
+  （`STORAGE_BACKEND` 环境变量）。`sql` / `redis` **只留接口不接实现**，注入实现即可切换，
+  业务代码零改动（SDK 级别的"留出数据库接口，以便后续接入"）；
+- **单号收口**：办理单 / 收集单 / 会话 / 办结号统一走 `IdAllocator`，支持落盘对齐历史最大号
+  （`reserve`）与多实例前缀（`INSTANCE_ID`），单进程重启与多实例都不再重号；
+- **原子落盘**：JSON 写盘改 `os.replace` 原子替换（`app/storage/atomic.py`），读方看不到半截文件；
+- **多用户归属**：会话 / 材料收集单 / 办理单都记 `owner_id`，接口按归属校验（RBAC）。
 
-**现象**：`server/materials.py::read_file`
+**仍待办**：真实多进程部署时按 `docs/12` 第 6 节把 `STORAGE_BACKEND` 切到
+`sql` / `redis` 并注入实现（会话进 Redis、办理单进 PostgreSQL/MySQL、材料进对象存储）。
+
+## 5. 材料文件接口没有鉴权 ✅ 已解决
+
+**原问题**：`server/materials.py::read_file`
 （`GET /api/materials/{intake_id}/{material_id}/files/{file_id}`）
 ——谁知道 URL 谁就能下载身份证照片。
 
-**修法**：上线前必须加鉴权（token / 会话校验）+ HTTPS + 访问控制。
-材料属敏感个人信息，这是**合规硬要求**，不是优化项。
+**已做**（详见 `docs/12` 第 5 节）：
+
+- 所有材料接口按归属校验（本人或 `material:any`），越权返回 403；
+- 文件读取要么带**绑定到该文件的短时签名链接**（`?token=`，默认 10 分钟，
+  由 `MaterialService` 自动签进 URL，图片可直接当 `<image src>`），
+  要么带**归属人本人的登录令牌**；都不满足 401 / 403；
+- 账号体系：`/api/auth/register` / `/api/auth/login` / `/api/auth/me`，
+  口令 PBKDF2 哈希、令牌 HMAC 自包含；`AUTH_REQUIRED=1` 强制登录（默认关闭，
+  单用户 Demo 行为不变）。
+
+**仍待办**：上线接 **HTTPS**；把 `AUTH_REQUIRED` 置 1；按 `docs/12` 第 11 节补
+令牌吊销、审计日志与敏感信息脱敏。材料属敏感个人信息，这是**合规硬要求**，不是优化项。
 
 ## 6. App 打包配置 ✅ 已配置（appid 待换正式值）
 
@@ -178,7 +200,7 @@ README 的"桩实现 → 真实接入"表里已经许了这件事，这里是它
 | --- | --- | --- |
 | 现在（H5 调试） | 无 | 0 |
 | **第一次真机跑 App** | 填 `appid`、明文 HTTP 策略 | 第 0/1/2/3/6 条**已完成**，`npm run build:app` 已能产出产物 |
-| **给多个真实用户用** | 4、5 | 大改（Redis + 数据库 + 鉴权） |
+| **给多个真实用户用** | 4、5 | 后端**已完成**（存储抽象 + 多用户归属 + 鉴权，见 `docs/12`）；剩前端登录界面、`STORAGE_BACKEND` 切数据库 / Redis、HTTPS |
 
 ## 怎么验前端（`frontend/scripts/probe-h5.mjs`）
 
