@@ -143,6 +143,8 @@ def main():
         "scenario_id": "restaurant_open", "question": "需要什么材料",
         "session_id": talk["session_id"]})
     assert r.status_code == 200 and r.json()["answer"], r.json()
+    # 知识库真的接上了：回答里带办事指南依据（见 docs/11）
+    assert "来自办事指南" in r.json()["answer"], r.json()["answer"]
     r = client.post("/api/ask", json={
         "scenario_id": "restaurant_open", "question": "hi", "session_id": "nope"})
     assert r.status_code == 404, r.text

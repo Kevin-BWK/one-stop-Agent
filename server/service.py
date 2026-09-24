@@ -91,7 +91,7 @@ class AgentService:
             text = rec.agents["progress"].query(rec.case.item_status, rec.scenario["items"])
             return self._state(rec, message=text, intent=intent)
         if intent == "consult":
-            reply = rec.agents["consult"].answer(message, rec.scenario)
+            reply = rec.agents["consult"].answer(message, rec.scenario, self.knowledge)
             return self._state(rec, message=reply, intent=intent)
         # apply
         if rec.planned:

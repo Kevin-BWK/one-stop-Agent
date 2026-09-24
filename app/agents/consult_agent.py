@@ -7,7 +7,12 @@
    保证零依赖 Demo 与离线单测仍然可用。
 
 两条路径都遵守 `docs/08` 的文案规范：不出现 JSON 字面量、内部事项 id、字段 key、模型名。
+
+回答**可以带办事指南依据**：传入 `knowledge` 时先按问题检索相关片段（见
+`app/knowledge/retriever.py`），命中就作为模型作答的依据、也附在离线兜底回答后面。
+检索是增强项——没传知识库或没命中时，行为与之前完全一致。
 """
+from ..knowledge.retriever import format_chunks
 from ..materials.spec import material_names
 from .base import BaseAgent
 
@@ -24,18 +29,35 @@ class ConsultAgent(BaseAgent):
     # 不设上限会让长会话把请求撑爆，也会让模型被早期无关内容带偏。
     MAX_HISTORY = 6
 
-    def answer(self, question, scenario):
+    # 每次咨询带进办事指南的最大片段数
+    TOP_K = 3
+
+    def answer(self, question, scenario, knowledge=None):
+        """作答。传入 `knowledge` 时会先检索办事指南作为依据。"""
         model = self.model_for()
+        chunks = self._guide_chunks(knowledge, scenario, question)
         reply = self.moma.complete(
             model,
-            self._messages(question, scenario),
-            fallback=self._local_reply(question, scenario),  # 离线 / 失败时的人话兜底
+            self._messages(question, scenario, chunks),
+            fallback=self._local_reply(question, scenario, chunks),  # 离线 / 失败时的人话兜底
             context=self.context,
             role=self.role,
         )
         self.context.add_history("user", question)
         self.context.add_history("assistant", reply)
         return reply
+
+    # ---------- 办事指南依据 ----------
+
+    def _guide_chunks(self, knowledge, scenario, question):
+        """按问题检索办事指南片段；没传知识库、或没命中，都返回空列表。"""
+        if knowledge is None:
+            return []
+        try:
+            return knowledge.search(scenario.get("id", ""), question or "", top_k=self.TOP_K)
+        except Exception:
+            # 检索是增强项：它出问题不该让"咨询"整个失败
+            return []
 
     # ---------- 给模型的消息 ----------
 
@@ -45,7 +67,7 @@ class ConsultAgent(BaseAgent):
             v["name"] + "（" + v["department"] + "）" for v in scenario["items"].values()
         )
 
-    def _messages(self, question, scenario):
+    def _messages(self, question, scenario, chunks=()):
         # 材料在场景配置里存的是 id，喂给模型前必须转成中文名（见 docs/08 文案规范）
         materials = "、".join(material_names(scenario, scenario.get("base_materials") or []))
         system = (
@@ -55,6 +77,10 @@ class ConsultAgent(BaseAgent):
             "办理事项：" + self._item_text(scenario) + "。"
             "基础材料：" + (materials or "以办事指南为准") + "。"
         )
+        if chunks:
+            # 检索到的指南片段作为作答依据；提醒它别把片段原样倒出来
+            system += ("\n\n【办事指南节选（作答依据，请用自己的话回答，不要照抄）】\n"
+                       + format_chunks(chunks))
         messages = [{"role": "system", "content": system}]
         # 多轮上下文：带上本会话之前的问答，用户才能说"那第二个呢"这种省略句。
         # 当前问题此时还没写进 history（answer() 在拿到回复后才记），所以不会重复。
@@ -65,8 +91,12 @@ class ConsultAgent(BaseAgent):
 
     # ---------- 本地兜底：离线或模型失败时，按问题给固定人话 ----------
 
-    def _local_reply(self, question, scenario):
-        return self._compose(question or "", scenario)
+    def _local_reply(self, question, scenario, chunks=()):
+        reply = self._compose(question or "", scenario)
+        if chunks:
+            # 让离线兜底也带上检索依据，否则"接了知识库"在离线时看不出任何变化
+            reply += "\n\n（来自办事指南）\n" + format_chunks(chunks)
+        return reply
 
     def _compose(self, question, scenario):
         text = question or ""

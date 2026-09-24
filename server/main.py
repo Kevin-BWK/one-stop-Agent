@@ -132,7 +132,8 @@ def create_app() -> FastAPI:
                 context = service.context_of(req.session_id)
             except KeyError as e:
                 raise HTTPException(status_code=404, detail=str(e))
-        return {"question": question, "answer": answer_question(scenario, question, context)}
+        return {"question": question,
+                "answer": answer_question(scenario, question, context, service.knowledge)}
 
     @app.get("/apply")
     def apply_stream(scenario_id: str, utterance: str = "", answers: str = "{}",

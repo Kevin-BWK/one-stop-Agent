@@ -37,14 +37,16 @@ def load_scenario(scenario_id: str) -> Optional[Dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def answer_question(scenario: Dict[str, Any], question: str, context=None) -> str:
+def answer_question(scenario: Dict[str, Any], question: str, context=None,
+                    knowledge=None) -> str:
     """咨询应答：复用咨询 Agent（接 MoMA 后即为真实对话模型，接口不变）。
 
     传入 `context`（会话上下文）时会带上该会话的历史问答，即**多轮上下文**；
     不传则用一次性上下文，等价于无状态的单轮问答。
+    传入 `knowledge` 时会先检索办事指南作为作答依据（见 `docs/11`）。
     """
     agent = ConsultAgent(MoMAClient(), context if context is not None else SessionContext())
-    return agent.answer(question, scenario)
+    return agent.answer(question, scenario, knowledge)
 
 
 def missing_required(scenario: Dict[str, Any], answers: Optional[Dict[str, Any]]) -> list:

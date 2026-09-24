@@ -174,7 +174,8 @@ class MainAgent:
 
         # 2. 咨询
         flow.start("consult")
-        self._log(trace, on_event, "咨询Agent", self.consult.answer(utterance, self.scenario))
+        self._log(trace, on_event, "咨询Agent",
+                  self.consult.answer(utterance, self.scenario, self.knowledge))
         self._complete(trace, flow, "consult", "已说明办理要点与材料", on_event=on_event)
 
         # 3. 信息采集
