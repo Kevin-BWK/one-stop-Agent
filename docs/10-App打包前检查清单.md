@@ -6,52 +6,79 @@
 
 ## 0. 依赖冲突：App 构建直接失败 ✅ 已解决
 
-**现象**：`npm run build:app` 报
-`"normalizeCssVarValue" is not exported by "@vue/shared"`。
+**现象**（两个错，先后出现）：
 
-**H5 构建不受影响**（走的解析路径不同），所以这个问题一直没暴露。
+1. `npm run build:app` 报 `"normalizeCssVarValue" is not exported by "@vue/shared"`；
+2. 修掉它之后又报 `"isInSSRComponentSetup" is not exported by "vue"`。
 
-**根因**（实测版本）：
+**H5 构建与 dev server 一直看不出问题**，所以这条藏了很久。
 
-| 包 | 装到的版本 |
-| --- | --- |
-| `vue` | 3.5.43 |
-| `@vue/runtime-core` | 3.5.43 |
-| `@vue/shared` | **3.4.21** ← 落后一档 |
+**根因（两件事叠加）**：
 
-`package.json` 写的是 `vue: ^3.4.21` / `@vue/runtime-core: ^3.4.21`，`^` 让它们漂到了 3.5.43；
-而 `@dcloudio/*` 把 `@vue/shared` 钉在 `3.4.21`。于是 `@vue/runtime-core@3.5` 要用的
-`normalizeCssVarValue`（3.5 才有）在 `@vue/shared@3.4` 里找不到。
+1. **`@dcloudio/uni-app-plus` 没装**。App 平台插件缺失时，编译期解析不到 `isInSSRComponentSetup`
+   （它来自 vue 3.5 的运行时导出）——这是第 2 个错的来源。
+2. **`vue` / `@vue/runtime-core` 被 `^3.4.21` 漂到了 3.5.43**。而 uni 整套是按 **vue 3.4.21**
+   构建的（`@dcloudio/*` 一律声明 `vue: 3.4.21`、`@vue/shared: 3.4.21`）。
+   vue 3.5.43 的 `@vue/runtime-core` 要用 `@vue/shared@3.5.43` 的 `normalizeCssVarValue`（3.4 没有）——
+   这是第 1 个错的来源。
 
-**别改错方向**：曾试过把 `vue` / `@vue/runtime-core` 降到 `3.4.21` 去对齐，结果错误换成
-`"isInSSRComponentSetup" is not exported by "vue"` —— 这版 `@dcloudio/uni-app` 是**按 vue 3.5 构建的**
-（`isInSSRComponentSetup` 在 3.4.21 里不存在）。**要对齐的是 `@vue/shared`，不是 `vue`。**
+**已做**（`frontend/package.json`，四条一起）：
 
-**已做**（`frontend/package.json`）：
-
-- 把 `@vue/shared` 顶到与 `vue` 同版本：`"overrides": { "@vue/shared": "$vue" }`；
-- 把 `vue` / `@vue/runtime-core` 从 `^3.4.21` 改成**确切版本 `3.5.43`**——继续用 `^` 会再次漂移，
-  而 `$vue` 依赖确切版本才能把两者锁死；
 - 补装 `@dcloudio/uni-app-plus@3.0.0-5020620260917001`（App 平台插件，此前缺失）；
-- 删掉 `package-lock.json` 重建——旧 lockfile 已把这个不匹配固化了，增量 install 解不开。
+- `vue` / `@vue/runtime-core` 从 `^3.4.21` 改成**确切版本 `3.4.21`**（回到 uni 声明的版本；
+  继续用 `^` 会再次漂到 3.5）；
+- `pinia` 钉成 `2.2.2`（`^2.2.6` 会解析到 2.3.1，而 2.3.x 的 peer 要求 `vue ^3.5.11`，与 3.4 冲突）；
+- 删掉 `package-lock.json` 重建（旧 lockfile 已把不匹配固化，增量 install 解不开）。
 
-**已验证**：`vue-tsc` 零错误；H5 构建成功（`dist/build/h5/`）；**App 构建成功**
-（`dist/build/app/`，日志提示 `open HBuilderX, import dist\build\app run`）；产出的
-`manifest.json` 里能看到第 6 条声明的全部权限；`VITE_API_BASE` 确实注入进了 `app-service.js`。
+**还必须有这个 override**：
 
-**为什么不选"升级整套 `@dcloudio`"**：查了更新一版的 `@dcloudio/uni-h5`（`vue3` tag，
-`3.0.0-alpha-5020720260921001`，比在用版本新），它**仍然声明 `@vue/shared: 3.4.21`**——
-所以升级并不能修掉这个问题，照样要配 `overrides`，等于"多做一遍工具链换代、收益为零"。
-升 uni 组件应作为独立的工具链升级事项来做，不要和这个 bug 绑在一起。
+```json
+"overrides": { "@vue/shared": "3.4.21" }
+```
 
-> `overrides` 属于**覆盖官方声明的版本**（uni 声明的是 3.4.21），是官方未验证的组合。
-> 目前只用到 `@vue/shared` 里长期稳定的工具函数（`hasOwn` / `capitalize` / `extend` 等），
-> 风险可控；若将来 uni 把声明改到 3.5，应尽早去掉这个 override。
+原因：`@dcloudio/vite-plugin-uni` 带了一条**构建期**依赖链
+`@vitejs/plugin-vue-jsx → @vue/babel-plugin-jsx → @vue/compiler-sfc@3.5.43 → @vue/shared@3.5.43`，
+它会把 `@vue/shared@3.5.43` **提升到顶层**（项目其实不用 JSX）。而 **vite 的依赖优化会把
+`@vue/shared` 扁平化到顶层那一份**，于是 H5 运行时（`@dcloudio/uni-h5-vue`，一份 3.4 系的 Vue）
+也拿到了 3.5 的 shared，切换场景重建组件时抛：
 
-**一个已知副作用**：重建 lockfile 后有 **7 条 `resolved` 指向 `registry.npmjs.org`**
-（`@dcloudio/uni-app-plus` 及其依赖、`@vue/shared`、`@vue/consolidate`、`licia`），
-其余 502 条指向 `registry.npmmirror.com`。原因是**镜像上还没有那几个最新版本**，
-npm 自动回退到官方源（实测可成功安装）。若队友环境只能访问镜像，需留意这 7 个包。
+```
+TypeError: Cannot assign to read only property '_' of object
+    at updateSlots → updateComponentPreRender → patchKeyedChildren
+```
+
+抛错发生在 patch 链中间，**DOM 停在半新半旧**：胶囊与表单字段还是旧场景的，
+而对话区标题与必填提示已经是新场景的——看起来就像"点了没反应 / 只变了一半"。
+把顶层压回 3.4.21 即可。
+
+**已验证**（用 `frontend/scripts/probe-h5.mjs` 实测，见文末"怎么验前端"）：
+
+- 点「开办企业」后：胶囊变 `开办企业[*]`、对话区标题变「开办企业一件事」、表单变 7 个企业字段、
+  两处必填提示都变 3 项企业字段，且**控制台无 error**；
+- `vue-tsc` 零错误；H5 构建成功（`dist/build/h5/`）；**App 构建成功**（`dist/build/app/`，
+  日志提示 `open HBuilderX, import dist\build\app run`）；
+- App 产物 `manifest.json` 里能看到第 6 条声明的全部权限；`VITE_API_BASE` 确实注入进了 `app-service.js`。
+
+**为什么不用"升级整套 `@dcloudio`"来修**：查了更新一版的 `@dcloudio/uni-h5`（`vue3` tag，
+`3.0.0-alpha-5020720260921001`，比在用版本新），它**仍然声明 `vue: 3.4.21` / `@vue/shared: 3.4.21`**
+——说明 3.4.21 就是这一代 uni 的目标版本，升级不解决问题。升 uni 组件应作为独立的
+工具链升级事项来做，不要和这个 bug 绑在一起。
+
+> **排查路上踩过的两个坑（记录以免重犯）**：
+>
+> 1. 一度以为"要往 vue 3.5 对齐"，用 `overrides: { "@vue/shared": "$vue" }` 把 shared 顶到 3.5.43。
+>    App 构建确实过了，但**把 H5 弄坏了**——就是上面那个 slots 报错。
+>    **不要用 override 把 shared 顶到 3.5**，H5 运行时（`uni-h5-vue`）会挂。
+> 2. 又一度以为"vue 必须 ≥3.5"（因为降到 3.4.21 时报 `isInSSRComponentSetup`），
+>    其实那只是因为当时 `@dcloudio/uni-app-plus` **还没装**。装上之后，全套 3.4.21
+>    能同时通过 App 构建与 H5 渲染。
+>
+> 结论：**以 `@dcloudio` 声明的版本为准（vue 3.4.21）**，并把构建期依赖顶上去的
+> `@vue/shared` 压回同版本。
+
+**一个已知副作用**：重建 lockfile 后有 7 条 `resolved` 指向 `registry.npmjs.org`
+（`@dcloudio/uni-app-plus` 及其依赖、`@vue/consolidate`、`licia`），其余指向 `registry.npmmirror.com`。
+原因是**镜像上还没有那几个版本**，npm 自动回退到官方源（实测可成功安装）。
 
 ## 1. `fetch` 用了相对路径，App 端必挂 ✅ 已解决
 
@@ -140,3 +167,29 @@ README 的"桩实现 → 真实接入"表里已经许了这件事，这里是它
 | 现在（H5 调试） | 无 | 0 |
 | **第一次真机跑 App** | 填 `appid`、明文 HTTP 策略 | 第 0/1/2/3/6 条**已完成**，`npm run build:app` 已能产出产物 |
 | **给多个真实用户用** | 4、5 | 大改（Redis + 数据库 + 鉴权） |
+
+## 怎么验前端（`frontend/scripts/probe-h5.mjs`）
+
+这个项目**没有前端自动化测试**。而第 0 条那个 bug 说明了：**"界面只更新一半"这类问题
+靠读代码是推不出来的**——渲染中途抛错会让 DOM 停在半新半旧的状态，代码看着完全正确。
+
+所以留了这个探测脚本：用无头 Chrome 打开 dev server，点一次场景切换，
+把「胶囊 / 对话区标题 / 表单字段 / 两处必填提示」前后各读一遍，并收集控制台 error。
+
+```bash
+# 1) 起无头 Chrome（连远程调试端口）
+"C:\Program Files\Google\Chrome\Application\chrome.exe" \
+  --headless=new --disable-gpu --remote-debugging-port=9222 \
+  --user-data-dir=..\data\runtime\cc-probe --no-first-run \
+  --no-default-browser-check http://127.0.0.1:5173/
+
+# 2) 跑探测（Node 20 需要显式打开 WebSocket）
+node --experimental-websocket scripts/probe-h5.mjs 9222
+```
+
+判定标准：点「开办企业」后，胶囊应变成 `开办企业[*]`、标题应为「开办企业一件事」、
+表单应为 7 个企业字段、提示应为 3 项企业字段，且**控制台无 error**。
+`chips` 没变或字段数对不上，就说明渲染中途断了——先去控制台找 `TypeError`。
+
+> 它不替代人工点测，但能在一秒内回答"界面到底更新完整了没有"，
+> 而且能在**没有人盯着屏幕**的时候跑。改依赖、改模板之后建议跑一次。
