@@ -539,6 +539,36 @@ def test_service_and_agent_actually_use_the_checker():
     assert len(session.calls) == 1, session.calls
 
 
+def test_service_switches_to_vision_when_model_configured():
+    """接线：配了多模态模型，MaterialService 会自动从桩核验切到视觉核验。
+
+    这是"多模态材料核验"能不能生效的那根线。单测 `build_checker` 不够——
+    要确认服务是拿同一个 moma 去装配的，否则会出现"核验器能造出来、服务却不用"的假接线。
+    """
+    from app.materials.verify import StubChecker, VisionChecker
+    from test_moma_client import FakeSession, no_sleep
+
+    def service_in(name):
+        return MaterialService(
+            store=MaterialStore(intakes_file=TMP / name / "intakes.json",
+                                materials_dir=TMP / name / "materials"),
+            moma=None,
+        )
+
+    # 默认（没配模型）：桩核验
+    assert isinstance(service_in("switch_stub").checker, StubChecker)
+
+    # 配了子端点：自动切到视觉核验，模型名取自 vision 池
+    live = MaterialService(
+        store=MaterialStore(intakes_file=TMP / "switch_live" / "intakes.json",
+                            materials_dir=TMP / "switch_live" / "materials"),
+        moma=MoMAClient(api_base="https://x/v1", api_key="k",
+                        session=FakeSession([]), sleep=no_sleep),
+    )
+    assert isinstance(live.checker, VisionChecker), live.checker
+    assert live.checker.model == "qwen-vl", live.checker.model
+
+
 if __name__ == "__main__":
     test_plan_follows_condition_rules()
     test_upload_enforces_slots_and_count()
@@ -561,4 +591,5 @@ if __name__ == "__main__":
     test_build_checker_selects_by_live_model()
     test_form_check_runs_before_model()
     test_service_and_agent_actually_use_the_checker()
+    test_service_switches_to_vision_when_model_configured()
     print("ALL MATERIALS TESTS PASSED")
