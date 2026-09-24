@@ -1,14 +1,41 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { SCENARIOS } from '@/api/http'
 import ChatPanel from '@/components/ChatPanel.vue'
 import DynamicForm from '@/components/DynamicForm.vue'
+import MaterialPanel from '@/components/MaterialPanel.vue'
 import ProgressBoard from '@/components/ProgressBoard.vue'
 import { useCaseStore } from '@/stores/case'
 
 const store = useCaseStore()
 const queryId = ref('')
+
+const missingText = computed(() => store.missingFields.map((field) => field.label).join('、'))
+
+/** 第一步：填完信息 -> 换取材料清单 */
+const prepareLabel = computed(() => {
+  if (store.preparing) {
+    return '正在生成材料清单…'
+  }
+  if (!store.scenario) {
+    return '加载中…'
+  }
+  return store.formComplete ? '下一步：提交材料' : '请先补全必填信息'
+})
+
+/** 第二步：材料齐备 -> 开始办理 */
+const submitLabel = computed(() => {
+  if (store.running) {
+    return '办理中…'
+  }
+  if (!store.materialsReady) {
+    return (
+      '材料未齐（' + store.materialSummary.passed + '/' + store.materialSummary.total + '）'
+    )
+  }
+  return '开始办理'
+})
 
 onMounted(() => {
   store.loadScenario()
@@ -41,9 +68,36 @@ onMounted(() => {
         <ChatPanel />
 
         <view class="actions">
-          <button class="btn" :disabled="store.running || !store.scenario" @click="store.start()">
-            {{ store.running ? '办理中…' : '开始办理' }}
+          <!-- 第一步：填完申请信息，先换材料清单（材料清单由条件判定产出） -->
+          <button
+            v-if="!store.intakeId"
+            class="btn"
+            :disabled="!store.formComplete || store.preparing || store.running"
+            @click="store.prepare()"
+          >
+            {{ prepareLabel }}
           </button>
+
+          <!-- 第二步：材料齐备后才允许并联提交 -->
+          <template v-else>
+            <view class="steps">
+              <text class="steps__item steps__item--done">① 填写信息 ✓</text>
+              <text
+                class="steps__item"
+                :class="{ 'steps__item--done': store.materialsReady }"
+              >
+                ② 材料 {{ store.materialSummary.passed }}/{{ store.materialSummary.total }}
+              </text>
+              <text class="steps__item">③ 并联办理</text>
+            </view>
+            <button class="btn" :disabled="!store.canSubmit" @click="store.start()">
+              {{ submitLabel }}
+            </button>
+          </template>
+
+          <text v-if="store.missingFields.length" class="actions__hint">
+            还有 {{ store.missingFields.length }} 项必填未填：{{ missingText }}
+          </text>
 
           <view class="query">
             <input
@@ -58,6 +112,7 @@ onMounted(() => {
 
       <view class="col col--right">
         <DynamicForm />
+        <MaterialPanel />
         <ProgressBoard />
       </view>
     </view>
@@ -170,6 +225,33 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.actions__hint {
+  font-size: 12px;
+  line-height: 18px;
+  color: #b45309;
+}
+
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.steps__item {
+  padding: 3px 9px;
+  color: #6b7280;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+}
+
+.steps__item--done {
+  color: #15803d;
+  background: #e8f6ed;
+  border-color: #b7e0c6;
 }
 
 .btn {

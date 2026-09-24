@@ -130,9 +130,11 @@ def test_model_env_override():
 
 
 def test_consult_agent_wiring():
-    # 桩模式 -> 本地办理要点回退
+    # 桩模式 -> 本地固定人话兜底：按问题作答，且不出现模型名（见 docs/08 文案规范）
     stub = ConsultAgent(MoMAClient(api_base="", api_key=""), SessionContext())
-    assert "办理要点" in stub.answer("需要什么材料", SCENARIO)
+    reply = stub.answer("需要什么材料", SCENARIO)
+    assert "身份证" in reply, reply
+    assert "[" not in reply and "]" not in reply, reply
 
     # 真实模式 -> 使用模型回复，且系统提示带上场景信息
     session = FakeSession([ok("模型回答")])

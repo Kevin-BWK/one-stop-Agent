@@ -1,8 +1,12 @@
 """端到端 API 测试：用 FastAPI TestClient 驱动完整多轮流程。
 
+流程：建会话 -> 逐字段采集 -> 产出材料清单 -> 上传材料 -> 跑编排 -> 会话内查进度。
+（材料未齐不允许受理，见 `docs/09`。）
+
 依赖：pip install -r requirements.txt httpx
 用法：python tests/test_api_e2e.py
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -36,7 +40,24 @@ ENTERPRISE = {
 }
 
 
+# 造一张体积正常（核验通过）的图片
+JPG = b"\xff\xd8\xff\xe0" + b"\x00" * (20 * 1024 - 4)
+
+
+def upload_materials(client, intake_id, view):
+    """按槽位把必交材料全部传齐（材料未齐不允许受理，见 docs/09）。"""
+    for material in view["materials"]:
+        for slot in (material["slots"] or [""]):
+            r = client.post(
+                "/api/materials/" + intake_id + "/" + material["id"] + "/files",
+                files={"file": ((slot or material["id"]) + ".jpg", JPG, "image/jpeg")},
+                data={"slot": slot},
+            )
+            assert r.status_code == 200, r.text
+
+
 def apply_and_submit(client, scenario_id, answers, message):
+    """多轮采集 -> 产出材料清单 -> 上传材料 -> 跑编排 -> 从会话取办理单。"""
     r = client.post("/api/session", json={"scenario_id": scenario_id})
     assert r.status_code == 200, r.text
     sid = r.json()["session_id"]
@@ -54,8 +75,27 @@ def apply_and_submit(client, scenario_id, answers, message):
         t = r.json()
         guard += 1
         assert guard < 20
-    assert t.get("case"), t
-    return sid, t
+
+    # 字段采齐后只产出材料清单，此时**尚未受理**
+    assert t.get("intake_id"), t
+    assert t.get("case") is None, t
+    intake_id = t["intake_id"]
+    upload_materials(client, intake_id, t["material_view"])
+
+    # 材料齐备 -> 跑编排（带 session_id，办理单会挂回会话）
+    r = client.get("/apply", params={
+        "scenario_id": scenario_id,
+        "utterance": message,
+        "answers": json.dumps(answers, ensure_ascii=False),
+        "intake_id": intake_id,
+        "session_id": sid,
+    })
+    assert r.status_code == 200, r.text
+    assert "event: finished" in r.text, r.text
+
+    state = client.get("/api/sessions/" + sid).json()
+    assert state.get("case"), state
+    return sid, state
 
 
 def main():
@@ -76,7 +116,7 @@ def main():
     case = t["case"]
     assert "D_signboard" in case["items"], case["items"]
     assert "C_fire" not in case["items"], case["items"]
-    assert "油烟净化设施证明" in case["materials"], case["materials"]
+    assert "oil_purifier" in case["materials"], case["materials"]  # 热食 -> 油烟净化设施证明
 
     # 办理单查询
     r = client.get(f"/api/cases/{case['case_id']}")
@@ -95,7 +135,7 @@ def main():
     # 企业完整办理（条件路由：开户 + 用工备案）
     _, te = apply_and_submit(client, "enterprise_open", ENTERPRISE, "我想注册一家科技公司")
     assert "D_bank" in te["case"]["items"], te["case"]["items"]
-    assert "用工备案材料" in te["case"]["materials"], te["case"]["materials"]
+    assert "labor_filing" in te["case"]["materials"], te["case"]["materials"]  # 10 人 -> 用工备案
 
     # 大面积触发消防
     big = dict(RESTAURANT, area_sqm=500)

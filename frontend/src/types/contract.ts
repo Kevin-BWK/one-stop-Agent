@@ -76,6 +76,57 @@ export interface CollectField {
   required?: boolean
 }
 
+/** 用户已提交的单个文件（材料区渲染缩略图用） */
+export interface MaterialFile {
+  file_id: string
+  slot: string
+  filename: string
+  size: number
+  status: string
+  reason: string
+  /** 读回地址，直接作为 <image src> 使用 */
+  url: string
+  uploaded_at: string
+}
+
+/** 一份材料：清单信息 + 提交状态 + 已传文件 */
+export interface MaterialItem {
+  id: string
+  name: string
+  /** 为什么要交 */
+  reason: string
+  /** 形式要求（怎么给） */
+  form: string
+  accept: string[]
+  /** 具名槽位；空数组表示"多页材料"，张数上限看 max_files */
+  slots: string[]
+  multiple: boolean
+  max_files: number
+  required: boolean
+  /** 待提交 / 已通过 / 需补正 */
+  status: string
+  missing_slots: string[]
+  files: MaterialFile[]
+}
+
+export interface MaterialSummary {
+  total: number
+  passed: number
+  ready: boolean
+}
+
+/** 材料收集单视图（POST /api/materials/intake 与各上传接口的统一返回） */
+export interface MaterialView {
+  intake_id: string
+  scenario_id: string
+  items: string[]
+  notes: string[]
+  summary: MaterialSummary
+  materials: MaterialItem[]
+  /** 对话区播报文案（仅创建时返回） */
+  message?: string
+}
+
 export interface ScenarioItem {
   name: string
   department: string

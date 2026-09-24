@@ -29,7 +29,7 @@ class MockGovServices:
         self._seq = max([self._seq_of(case.case_id) for case in cases] or [0])
         return self
 
-    def submit(self, scenario_id, items, materials, form):
+    def submit(self, scenario_id, items, materials, form, verify_report=None):
         self._seq += 1
         case_id = "YJS" + str(self._seq).zfill(4)
         item_status = {item: self.STAGES[0] for item in items}
@@ -40,7 +40,7 @@ class MockGovServices:
             form=form,
             items=items,
             materials=materials,
-            verify_report={},
+            verify_report=dict(verify_report or {}),
             item_status=item_status,
             flow=[],
             created_at=created,

@@ -4,10 +4,10 @@
   "opening": "我想在学校旁边开一家牛肉面馆",
   "collect_fields": [
     {"key": "name", "label": "店名", "type": "text", "required": true},
-    {"key": "business_type", "label": "经营类型", "type": "enum", "options": ["热食/有油烟", "冷食/无油烟", "蒸煮"]},
-    {"key": "area_sqm", "label": "经营面积（平方米）", "type": "number"},
+    {"key": "business_type", "label": "经营类型", "type": "enum", "options": ["热食/有油烟", "冷食/无油烟", "蒸煮"], "required": true},
+    {"key": "area_sqm", "label": "经营面积（平方米）", "type": "number", "required": true},
     {"key": "has_raw_food", "label": "是否经营生食/冷食/自制饮品", "type": "bool"},
-    {"key": "address", "label": "经营场所地址", "type": "text"},
+    {"key": "address", "label": "经营场所地址", "type": "text", "required": true},
     {"key": "signboard", "label": "是否设置户外招牌", "type": "bool"}
   ],
   "items": {
@@ -17,12 +17,54 @@
     "D_signboard": {"name": "户外招牌设施设置", "department": "城管", "output": "招牌许可"},
     "E_health_cert": {"name": "从业人员健康证", "department": "卫健", "output": "健康证"}
   },
+  "materials": {
+    "id_card": {
+      "name": "法定代表人身份证",
+      "reason": "用于确认申请人身份",
+      "form": "正面、反面各一张，四角完整、文字清晰",
+      "accept": ["jpg", "jpeg", "png"],
+      "slots": ["正面", "反面"],
+      "required": true
+    },
+    "premises": {
+      "name": "经营场所证明",
+      "reason": "证明您对该经营场所拥有合法使用权",
+      "form": "房产证或租赁合同的关键页",
+      "accept": ["jpg", "jpeg", "png", "pdf"],
+      "slots": ["场所证明"],
+      "required": true
+    },
+    "layout": {
+      "name": "平面布局图",
+      "reason": "用于核查加工区、就餐区与洗消区布局是否合规",
+      "form": "标注功能分区与面积，可手绘后拍照",
+      "accept": ["jpg", "jpeg", "png", "pdf"],
+      "slots": ["布局图"],
+      "required": true
+    },
+    "oil_purifier": {
+      "name": "油烟净化设施证明",
+      "reason": "经营热食需配套油烟净化设施",
+      "form": "设施照片或购置凭证",
+      "accept": ["jpg", "jpeg", "png", "pdf"],
+      "slots": ["设施证明"],
+      "required": true
+    },
+    "cold_room": {
+      "name": "专间布局图",
+      "reason": "经营生食/冷食需设置专间",
+      "form": "专间位置与设备布置图",
+      "accept": ["jpg", "jpeg", "png", "pdf"],
+      "slots": ["专间布局图"],
+      "required": true
+    }
+  },
   "base_items": ["A_license", "B_food_permit", "E_health_cert"],
-  "base_materials": ["身份证", "经营场所证明", "平面布局图"],
+  "base_materials": ["id_card", "premises", "layout"],
   "condition_rules": [
-    {"if": {"field": "business_type", "in": ["热食/有油烟"]}, "add_materials": ["油烟净化设施证明"], "note": "经营热食，需安装油烟净化设施"},
+    {"if": {"field": "business_type", "in": ["热食/有油烟"]}, "add_materials": ["oil_purifier"], "note": "经营热食，需安装油烟净化设施"},
     {"if": {"field": "area_sqm", "gte": 300}, "add_items": ["C_fire"], "note": "面积超过 300 平方米，需营业前消防检查"},
-    {"if": {"field": "has_raw_food", "bool": true}, "add_materials": ["专间布局图"], "note": "经营生食/冷食，需设置专间并增加许可项目"},
+    {"if": {"field": "has_raw_food", "bool": true}, "add_materials": ["cold_room"], "note": "经营生食/冷食，需设置专间并增加许可项目"},
     {"if": {"field": "signboard", "bool": true}, "add_items": ["D_signboard"], "note": "设置户外招牌，需城管审批"}
   ],
   "guide": "开办餐饮店需办理营业执照、食品经营许可证、健康证；根据经营情况可能涉及消防、城管与环保。"

@@ -10,16 +10,41 @@ import json
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
-from .schemas import (ApplyRequest, FieldSubmitRequest, MessageRequest,
-                      SessionCreateRequest)
+from .materials import build_router
+from .schemas import (ApplyRequest, AskRequest, FieldSubmitRequest,
+                      MessageRequest, SessionCreateRequest)
 from .service import AgentService
-from .stream import iter_events, load_case, load_scenario, sse_stream
+from .stream import (answer_question, iter_events, load_case, load_intake,
+                     load_scenario, material_gate, missing_required, sse_stream)
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="one-stop-agent API", version="0.1.0")
     service = AgentService()
     app.state.service = service
+    app.include_router(build_router())
+
+    def intake_or_400(intake_id):
+        """受理前置校验：材料没交齐就不允许开始办理。"""
+        if not intake_id:
+            return None
+        intake = load_intake(intake_id)
+        if intake is None:
+            raise HTTPException(status_code=404, detail="材料受理号不存在：" + intake_id)
+        return intake
+
+    def intake_guard(scenario, intake):
+        blocked = material_gate(scenario, intake)
+        if blocked:
+            raise HTTPException(status_code=400,
+                                detail="这些材料还没交齐或还没通过核验：" + "、".join(blocked))
+
+    def attach_hook(session_id):
+        """多轮会话路径：编排结束后把办理单挂回 session，供会话内查询进度。"""
+        if not session_id:
+            return None
+        return lambda case: service.attach_case(session_id, case)
+
 
     @app.get("/health")
     def health():
@@ -75,8 +100,20 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="场景不存在")
         return scenario
 
+    @app.post("/api/ask")
+    def ask(req: AskRequest):
+        """对话区提问：返回自然语言回答（咨询意图）。"""
+        scenario = load_scenario(req.scenario_id)
+        if scenario is None:
+            raise HTTPException(status_code=404, detail="场景不存在")
+        question = (req.question or "").strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="问题不能为空")
+        return {"question": question, "answer": answer_question(scenario, question)}
+
     @app.get("/apply")
-    def apply_stream(scenario_id: str, utterance: str = "", answers: str = "{}"):
+    def apply_stream(scenario_id: str, utterance: str = "", answers: str = "{}",
+                     intake_id: str = "", session_id: str = ""):
         """H5 端 SSE：`EventSource` 只能发 GET，故参数走查询串。"""
         scenario = load_scenario(scenario_id)
         if scenario is None:
@@ -85,8 +122,13 @@ def create_app() -> FastAPI:
             parsed = json.loads(answers or "{}")
         except ValueError:
             raise HTTPException(status_code=400, detail="answers 不是合法 JSON")
+        missing = missing_required(scenario, parsed)
+        if missing:
+            raise HTTPException(status_code=400, detail="还缺这些必填信息：" + "、".join(missing))
+        intake = intake_or_400(intake_id)
+        intake_guard(scenario, intake)
         return StreamingResponse(
-            sse_stream(scenario, utterance, parsed),
+            sse_stream(scenario, utterance, parsed, intake, attach_hook(session_id)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -97,8 +139,13 @@ def create_app() -> FastAPI:
         scenario = load_scenario(req.scenario_id)
         if scenario is None:
             raise HTTPException(status_code=404, detail="场景不存在")
+        missing = missing_required(scenario, req.answers)
+        if missing:
+            raise HTTPException(status_code=400, detail="还缺这些必填信息：" + "、".join(missing))
+        intake = intake_or_400(req.intake_id)
+        intake_guard(scenario, intake)
         return StreamingResponse(
-            sse_stream(scenario, req.utterance, req.answers),
+            sse_stream(scenario, req.utterance, req.answers, intake, attach_hook(req.session_id)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -117,10 +164,21 @@ def create_app() -> FastAPI:
             await websocket.close()
             return
 
+        try:
+            intake = intake_or_400(payload.get("intake_id", ""))
+            intake_guard(scenario, intake)
+        except HTTPException as exc:
+            await websocket.send_json(
+                {"type": "error", "data": {"code": "BadRequest", "message": str(exc.detail)}})
+            await websocket.close()
+            return
+
         loop = asyncio.get_running_loop()
+        hook = attach_hook(payload.get("session_id", ""))
 
         def pump():
-            for event in iter_events(scenario, payload.get("utterance", ""), payload.get("answers") or {}):
+            for event in iter_events(scenario, payload.get("utterance", ""),
+                                     payload.get("answers") or {}, intake, hook):
                 asyncio.run_coroutine_threadsafe(websocket.send_json(event.to_dict()), loop).result()
 
         try:
