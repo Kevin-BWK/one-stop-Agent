@@ -103,6 +103,21 @@ uvicorn server.main:app --reload
 - Windows 若无 `python` 命令，可改用 `py` 启动器，如 `py -3 run_demo.py`。
 - 接入 Web 前端 / 真实 MoMA 时再安装：`pip install -r requirements.txt`。
 
+### 换机器 / 队友首次接入
+
+1. **拉代码**：`git clone <仓库地址>`（已有仓库则 `git pull`）
+2. **装依赖**：`pip install -r requirements.txt`
+3. **复制配置模板并填入密钥**：
+   - Windows：`Copy-Item .env.example .env`
+   - macOS / Linux：`cp .env.example .env`
+   - 密钥只放在 `.env`（已被 `.gitignore` 忽略），**切勿提交**
+4. **验证是否真的走真实模型**：
+   - `python run_demo.py restaurant` —— 咨询回答由模型实时生成即成功
+   - 或起服务后 `curl.exe http://127.0.0.1:8000/health`，应返回 `{"status":"ok","moma":"live"}`
+5. **前端（可选）**：`cd frontend && npm install && npm run dev:h5`
+
+> 未配置 `.env` 时自动回退桩模式：流程能完整跑通，但不调用真实模型。
+
 ## 桩实现 → 真实接入
 
 | 模块 | 当前实现 | 真实接入 |
