@@ -5,6 +5,7 @@ import {
   createIntake,
   createSession,
   fetchCase,
+  fetchIntake,
   fetchPreview,
   fetchScenario,
   removeMaterialFile,
@@ -24,6 +25,9 @@ import type {
 } from '@/types/contract'
 
 let messageSeq = 0
+
+/** 本地草稿的存储键（只存本地，不上传、不含材料文件本身） */
+const DRAFT_KEY = 'ost_draft_v1'
 
 function emptyAnswers(fields: CollectField[]): Record<string, any> {
   const answers: Record<string, any> = {}
@@ -72,6 +76,8 @@ export const useCaseStore = defineStore('case', {
     total: 0,
     itemStatus: {} as Record<string, string>,
     itemOutput: {} as Record<string, string>,
+    /** 当前要办的事项 ID：预判阶段来自 preview，正式清单来自 intake */
+    itemIds: [] as string[],
     caseId: '',
     /** 会话号：用户第一次提问时懒建，用于对话区的多轮上下文 */
     sessionId: '',
@@ -96,6 +102,8 @@ export const useCaseStore = defineStore('case', {
     asking: false,
     error: '',
     loading: false,
+    /** 本地是否存着一份可恢复的草稿 */
+    draftAvailable: false,
     closer: null as null | (() => void)
   }),
 
@@ -128,6 +136,21 @@ export const useCaseStore = defineStore('case', {
         !!state.intakeId &&
         state.materialSummary.ready
       )
+    },
+    /**
+     * 有没有"还没保存的进度"——填过信息、聊过天、生成过材料清单都算。
+     *
+     * 开关型字段默认 false，不算"填过"；文本/数字要真填了内容才算。
+     */
+    draftDirty(state): boolean {
+      const answered = Object.keys(state.answers).some((key) => {
+        const value = state.answers[key]
+        if (value === null || value === undefined || value === false) {
+          return false
+        }
+        return String(value).trim() !== ''
+      })
+      return answered || state.messages.length > 0 || !!state.intakeId
     }
   },
 
@@ -155,6 +178,7 @@ export const useCaseStore = defineStore('case', {
       this.messages = []
       this.sessionId = ''
       this.intakeId = ''
+      this.itemIds = []
       this.materials = []
       this.materialSummary = { total: 0, passed: 0, ready: false }
       this.materialBusy = ''
@@ -209,7 +233,12 @@ export const useCaseStore = defineStore('case', {
         return
       }
       try {
-        this.preview = await fetchPreview(this.scenarioId, this.answers)
+        const preview = await fetchPreview(this.scenarioId, this.answers)
+        this.preview = preview
+        // 还没生成正式清单时，清单区展示预判；正式清单一旦生成就不再被预判覆盖
+        if (!this.intakeId && Array.isArray(preview.items)) {
+          this.itemIds = preview.items
+        }
       } catch (e) {
         // 预判只是辅助信息，失败不该弹错
       }
@@ -268,6 +297,7 @@ export const useCaseStore = defineStore('case', {
     /** 用后端返回的材料视图刷新本地状态（上传 / 撤回后统一走这里） */
     applyMaterialView(view: MaterialView) {
       this.intakeId = view.intake_id
+      this.itemIds = Array.isArray(view.items) ? view.items : this.itemIds
       this.materials = view.materials
       this.materialSummary = view.summary
       // 拿到了新的材料区状态，说明上一次的拒收问题已经翻篇
@@ -468,11 +498,12 @@ export const useCaseStore = defineStore('case', {
         this.materialSummary = { total: 0, passed: 0, ready: false }
         this.materialNotice = null
         this.preview = null
-        if (Array.isArray(found.flow)) {
-          this.nodes = found.flow
-        }
-        this.itemStatus = { ...(found.item_status || {}) }
-        this.utterance = ''
+      if (Array.isArray(found.flow)) {
+        this.nodes = found.flow
+      }
+      this.itemStatus = { ...(found.item_status || {}) }
+      this.itemIds = Object.keys(found.item_status || {})
+      this.utterance = ''
         this.running = false
         this.error = ''
       } catch (e: any) {
@@ -480,6 +511,104 @@ export const useCaseStore = defineStore('case', {
       } finally {
         this.loading = false
       }
+    },
+
+    /* ---------------- 草稿：把"没保存的进度"存到本地 ---------------- */
+
+    /** 保存草稿：对话 + 表单 + 材料单号一起存，不上传任何内容 */
+    saveDraft(): boolean {
+      try {
+        uni.setStorageSync(DRAFT_KEY, {
+          savedAt: Date.now(),
+          scenarioId: this.scenarioId,
+          answers: this.answers,
+          messages: this.messages,
+          opening: this.opening,
+          utterance: this.utterance,
+          sessionId: this.sessionId,
+          intakeId: this.intakeId,
+          itemIds: this.itemIds
+        })
+        this.draftAvailable = true
+        return true
+      } catch (e) {
+        this.error = '草稿保存失败：本地存储不可用'
+        return false
+      }
+    },
+
+    /** 读本地草稿（没有则返回 null） */
+    readDraft(): any | null {
+      try {
+        return uni.getStorageSync(DRAFT_KEY) || null
+      } catch (e) {
+        return null
+      }
+    },
+
+    /** 这份草稿里是否真有过内容（避免恢复一个空壳） */
+    hasDraftContent(draft: any): boolean {
+      const answers = (draft && draft.answers) || {}
+      const answered = Object.keys(answers).some((key) => {
+        const value = answers[key]
+        if (value === null || value === undefined || value === false) {
+          return false
+        }
+        return String(value).trim() !== ''
+      })
+      return (
+        answered ||
+        (Array.isArray(draft.messages) && draft.messages.length > 0) ||
+        !!draft.intakeId
+      )
+    },
+
+    /** 进去时检查有没有可恢复的草稿 */
+    checkDraft(): boolean {
+      const draft = this.readDraft()
+      this.draftAvailable = !!(draft && draft.scenarioId && this.hasDraftContent(draft))
+      return this.draftAvailable
+    },
+
+    /** 恢复草稿：表单与对话直接回填，材料按单号从后端拉回最新核验状态 */
+    async restoreDraft(): Promise<boolean> {
+      const draft = this.readDraft()
+      if (!draft || !draft.scenarioId) {
+        return false
+      }
+      await this.loadScenario(draft.scenarioId)
+      this.answers = { ...this.answers, ...(draft.answers || {}) }
+      this.messages = Array.isArray(draft.messages) ? draft.messages : []
+      this.utterance = draft.utterance || ''
+      this.sessionId = draft.sessionId || ''
+      this.itemIds = Array.isArray(draft.itemIds) ? draft.itemIds : []
+      this.error = ''
+      if (draft.intakeId) {
+        try {
+          this.applyMaterialView(await fetchIntake(draft.intakeId))
+        } catch (e) {
+          // 材料单可能已失效（后端重启等）：退回"重新生成材料清单"
+          this.intakeId = ''
+          this.materials = []
+          this.materialSummary = { total: 0, passed: 0, ready: false }
+        }
+      }
+      if (this.answers && Object.keys(this.answers).length) {
+        this.schedulePreview()
+      }
+      this.pushMessage('办事助手', '已恢复上次未完成的草稿，可以接着办。')
+      this.draftAvailable = true
+      return true
+    },
+
+    /** 丢掉本地草稿 */
+    discardDraft() {
+      try {
+        uni.removeStorageSync(DRAFT_KEY)
+      } catch (e) {
+        // 本地存储不可用时无需处理
+      }
+      this.draftAvailable = false
     }
   }
 })
