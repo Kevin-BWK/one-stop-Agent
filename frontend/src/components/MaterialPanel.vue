@@ -234,6 +234,7 @@ function sizeText(size: number): string {
 <style scoped>
 .panel {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   min-height: 0;
   background: #ffffff;
@@ -276,7 +277,7 @@ function sizeText(size: number): string {
 }
 
 .panel__body {
-  max-height: 420px;
+  max-height: 360px;
   padding: 0 16px 8px;
 }
 
@@ -362,8 +363,8 @@ function sizeText(size: number): string {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: 84px;
-  height: 84px;
+  width: 76px;
+  height: 76px;
   box-sizing: border-box;
   padding: 4px;
   border-radius: 10px;
@@ -488,8 +489,8 @@ function sizeText(size: number): string {
 
 .page {
   position: relative;
-  width: 64px;
-  height: 64px;
+  width: 62px;
+  height: 62px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   overflow: hidden;

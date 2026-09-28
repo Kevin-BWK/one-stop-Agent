@@ -7,6 +7,11 @@ onLaunch(() => {
 </script>
 
 <style>
+/* uni-app H5：页面根容器要有确定高度，页面内才能用百分比铺满一屏 */
+uni-page-body {
+  height: 100%;
+}
+
 page {
   background-color: #f5f7fb;
   color: #1f2329;

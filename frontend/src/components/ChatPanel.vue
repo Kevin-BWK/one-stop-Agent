@@ -94,9 +94,9 @@ function useOpening() {
 <style scoped>
 .chat {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
-  height: 100%;
-  min-height: 0;
+  min-height: 420px;
   background: #ffffff;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
@@ -234,3 +234,4 @@ function useOpening() {
   color: #f4f7ff;
 }
 </style>
+

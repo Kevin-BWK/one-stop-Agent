@@ -86,6 +86,7 @@ const notes = computed(() => (store.preview ? store.preview.notes : []))
       </text>
     </view>
 
+    <scroll-view class="cl__body" scroll-y>
     <view class="cl__block">
       <view class="cl__row">
         <text class="cl__label">需办事项</text>
@@ -117,11 +118,16 @@ const notes = computed(() => (store.preview ? store.preview.notes : []))
       <text class="cl__notes-title">为什么多出这几项</text>
       <text v-for="(note, index) in notes" :key="index" class="cl__note">· {{ note }}</text>
     </view>
+    </scroll-view>
   </view>
 </template>
 
 <style scoped>
 .cl {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  min-height: 0;
   padding: 12px 16px 14px;
   background: #ffffff;
   border: 1px solid #e5e7eb;
@@ -134,6 +140,10 @@ const notes = computed(() => (store.preview ? store.preview.notes : []))
   align-items: baseline;
   gap: 8px;
   margin-bottom: 10px;
+}
+
+.cl__body {
+  max-height: 430px;
 }
 
 .cl__title {

@@ -137,7 +137,7 @@ function onBool(key: string, event: any) {
 }
 
 .field {
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .field:last-child {
@@ -228,3 +228,4 @@ function onBool(key: string, event: any) {
 }
 
 </style>
+

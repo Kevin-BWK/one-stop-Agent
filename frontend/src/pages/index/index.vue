@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { onBackPress } from '@dcloudio/uni-app'
-import { computed, onMounted, ref } from 'vue'
+/**
+ * 办理子页面：以「办理对话」为主体居中，右侧是可收起的详情栏。
+ *
+ * 对话是主线（像通用 AI 助手那样）；清单 / 申请信息 / 材料 / 进度属于支撑信息，
+ * 放在右侧详情栏里，收起后对话占满整屏。
+ */
+import { computed, ref } from 'vue'
 
-import { SCENARIOS } from '@/api/http'
+import { onBackPress, onLoad } from '@dcloudio/uni-app'
+
 import ChatPanel from '@/components/ChatPanel.vue'
 import ChecklistPanel from '@/components/ChecklistPanel.vue'
 import DynamicForm from '@/components/DynamicForm.vue'
@@ -12,10 +18,12 @@ import { useCaseStore } from '@/stores/case'
 
 const store = useCaseStore()
 const queryId = ref('')
+const showQuery = ref(false)
+/** 右侧详情栏是否展开：默认收起，让对话居中当主体 */
+const railOpen = ref(false)
 
 const missingText = computed(() => store.missingFields.map((field) => field.label).join('、'))
 
-/** 第一步：填完信息 -> 换取材料清单 */
 const prepareLabel = computed(() => {
   if (store.preparing) {
     return '正在生成材料清单…'
@@ -26,7 +34,6 @@ const prepareLabel = computed(() => {
   return store.formComplete ? '下一步：提交材料' : '请先补全必填信息'
 })
 
-/** 第二步：材料齐备 -> 开始办理 */
 const submitLabel = computed(() => {
   if (store.running) {
     return '办理中…'
@@ -37,7 +44,6 @@ const submitLabel = computed(() => {
   return '开始办理'
 })
 
-/** 顶部三步指示：填信息 -> 交材料 -> 并联办理 */
 const stepState = computed(() => {
   const statuses = Object.values(store.itemStatus) as string[]
   const finished = !!store.caseId && statuses.length > 0 && statuses.every((s) => s === '已办结')
@@ -49,48 +55,79 @@ const stepState = computed(() => {
   }
 })
 
-/**
- * 离开前问一句"要不要保存"。
- *
- * 用操作表而不是确认框：确认框只有两个按钮，塞不下
- * "保存 / 不保存 / 取消" 三种选择（取消＝留在当前页）。
- */
-function askSaveDraft(after: (action: 'save' | 'discard' | 'cancel') => void) {
-  uni.showActionSheet({
-    itemList: ['保存草稿后离开', '不保存，直接离开'],
-    success: (res: any) => {
-      if (res.tapIndex === 0) {
-        after('save')
-      } else if (res.tapIndex === 1) {
-        after('discard')
-      } else {
-        after('cancel')
-      }
-    },
-    fail: () => after('cancel')
-  })
-}
+/** 离开前的“要不要保存”弹窗（自绘：uni 的 H5 操作表会卡住并抛错） */
+const leaveAsk = ref(false)
 
-/** 切换场景：手里有没保存的内容就先问一句，别把填好的冲掉 */
-function onSwitchScenario(id: string) {
-  if (id === store.scenarioId) {
-    return
-  }
-  if (!store.draftDirty) {
-    store.loadScenario(id)
-    return
-  }
-  askSaveDraft((action) => {
-    if (action === 'cancel') {
+function onPrimary() {
+  // 未填完 / 材料没齐：展开详情栏并告诉用户缺什么
+  if (!store.intakeId) {
+    if (!store.formComplete) {
+      railOpen.value = true
+      store.error = '请先在右侧「申请信息」里补全必填项：' + missingText.value
       return
     }
-    if (action === 'save') {
-      store.saveDraft()
-    } else {
-      store.discardDraft()
+    store.prepare()
+    return
+  }
+  if (!store.canSubmit) {
+    railOpen.value = true
+    store.error = store.materialsReady
+      ? '正在办理中，请稍候'
+      : '材料还没交齐，请在右侧「提交材料」里补齐'
+    return
+  }
+  store.start()
+}
+
+/**
+ * 离开办理页 → 回首页。
+ *
+ * 不用 navigateBack：H5 下它在应用内调用会被拒绝（promise reject），
+ * 表现为“点了按钮却没反应”。reLaunch 不依赖页面栈，H5 与 App 行为一致；
+ * 再做一层兜底，保证一定离得开。
+ */
+function leavePage() {
+  setTimeout(() => {
+    const goHome = () => {
+      try {
+        const r: any = uni.reLaunch({ url: '/pages/home/home' })
+        if (r && typeof r.catch === 'function') {
+          r.catch(() => {
+            if (typeof window !== 'undefined') {
+              window.location.hash = '#/pages/home/home'
+            }
+          })
+        }
+      } catch (e) {
+        if (typeof window !== 'undefined') {
+          window.location.hash = '#/pages/home/home'
+        }
+      }
     }
-    store.loadScenario(id)
-  })
+    goHome()
+  }, 120)
+}
+
+function goBack() {
+  if (!store.draftDirty) {
+    leavePage()
+    return
+  }
+  leaveAsk.value = true
+}
+
+/** 弹窗里的三个选择 */
+function confirmLeave(action: 'save' | 'discard' | 'cancel') {
+  leaveAsk.value = false
+  if (action === 'cancel') {
+    return
+  }
+  if (action === 'save') {
+    store.saveDraft()
+  } else {
+    store.discardDraft()
+  }
+  leavePage()
 }
 
 function onSaveDraft() {
@@ -103,24 +140,24 @@ function onSaveDraft() {
   }
 }
 
-onMounted(async () => {
-  await store.loadScenario()
-  if (store.checkDraft()) {
-    uni.showModal({
-      title: '发现未完成的草稿',
-      content: '上次有没办完的内容，要接着办吗？',
-      confirmText: '恢复草稿',
-      cancelText: '重新开始',
-      success: (res: any) => {
-        if (res.confirm) {
-          store.restoreDraft()
-        }
-      }
-    })
+onLoad(async (query: any) => {
+  const scenarioId = query && query.scenario ? String(query.scenario) : ''
+  const wantResume = !!(query && (query.resume === '1' || query.resume === 1))
+
+  if (wantResume && store.checkDraft()) {
+    await store.restoreDraft()
+    return
   }
+  if (scenarioId) {
+    if (scenarioId === store.scenarioId && store.scenario) {
+      return
+    }
+    await store.loadScenario(scenarioId)
+    return
+  }
+  await store.loadScenario()
 })
 
-// 浏览器：刷新 / 关标签页 / 跳外链时用原生提示拦一下
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', (event: BeforeUnloadEvent) => {
     if (!store.draftDirty) {
@@ -131,76 +168,75 @@ if (typeof window !== 'undefined') {
   })
 }
 
-// App / 小程序：返回键拦截，先问要不要保存
 onBackPress(() => {
   if (!store.draftDirty) {
     return false
   }
-  askSaveDraft((action) => {
-    if (action === 'cancel') {
-      return
-    }
-    if (action === 'save') {
-      store.saveDraft()
-    } else {
-      store.discardDraft()
-    }
-    setTimeout(() => uni.navigateBack({ delta: 1 }), 60)
-  })
+  leaveAsk.value = true
   return true
 })
 </script>
 
 <template>
-  <view class="app">
-    <view class="hero">
-      <view class="hero__brand">
-        <text class="hero__title">一件事 · 一次办</text>
-        <text class="hero__sub">智能体协同办理 · 进度实时推送</text>
+  <view class="page">
+    <!-- 顶栏 -->
+    <view class="top">
+      <view class="top__back" @click="goBack">
+        <text class="top__back-icon">‹</text>
+        <text class="top__back-text">返回</text>
       </view>
 
-      <view class="hero__scenarios">
+      <text class="top__name">{{ store.scenario ? store.scenario.name : '加载中…' }}</text>
+
+      <view class="steps">
+        <view class="step" :class="{ 'step--done': stepState.intake }">
+          <text class="step__dot">1</text>
+          <text class="step__text">填写信息</text>
+        </view>
+        <view class="step__line" :class="{ 'step__line--done': stepState.intake }" />
+        <view class="step" :class="{ 'step--done': stepState.materials }">
+          <text class="step__dot">2</text>
+          <text class="step__text">提交材料</text>
+        </view>
+        <view class="step__line" :class="{ 'step__line--done': stepState.materials }" />
         <view
-          v-for="item in SCENARIOS"
-          :key="item.id"
-          class="chip"
-          :class="{ 'chip--on': store.scenarioId === item.id }"
-          @click="onSwitchScenario(item.id)"
+          class="step"
+          :class="{
+            'step--done': stepState.finished,
+            'step--on': stepState.running && !stepState.finished
+          }"
         >
-          <text>{{ item.name }}</text>
+          <text class="step__dot">3</text>
+          <text class="step__text">并联办理</text>
+        </view>
+      </view>
+
+      <view class="top__actions">
+        <text v-if="store.draftAvailable || store.draftDirty" class="top__hint">
+          {{ store.draftAvailable ? '有草稿' : '未保存' }}
+        </text>
+        <view class="top__btn" @click="onSaveDraft">保存草稿</view>
+        <view class="top__btn top__btn--ghost" @click="showQuery = !showQuery">查单号</view>
+        <view class="top__btn top__btn--ghost" @click="railOpen = !railOpen">
+          {{ railOpen ? '收起详情' : '详情' }}
         </view>
       </view>
     </view>
 
-    <view class="steps">
-      <view class="step" :class="{ 'step--done': stepState.intake }">
-        <text class="step__idx">1</text>
-        <text class="step__text">填写信息</text>
-      </view>
-      <view class="step__line" :class="{ 'step__line--done': stepState.intake }" />
-      <view class="step" :class="{ 'step--done': stepState.materials }">
-        <text class="step__idx">2</text>
-        <text class="step__text">提交材料</text>
-      </view>
-      <view class="step__line" :class="{ 'step__line--done': stepState.materials }" />
-      <view
-        class="step"
-        :class="{
-          'step--done': stepState.finished,
-          'step--on': stepState.running && !stepState.finished
-        }"
-      >
-        <text class="step__idx">3</text>
-        <text class="step__text">并联办理</text>
-      </view>
+    <view v-if="showQuery" class="querybar">
+      <input v-model="queryId" class="querybar__input" placeholder="输入办理单号回看，如 YJS0001" />
+      <view class="querybar__btn" @click="store.query(queryId)">查询</view>
     </view>
 
+    <!-- 主体：对话居中，详情栏在右（可收起） -->
     <view class="body">
-      <view class="col col--chat">
-        <ChatPanel />
+      <view class="chatwrap">
+        <view class="chatbox">
+          <ChatPanel />
+        </view>
       </view>
 
-      <view class="col col--side">
+      <view v-if="railOpen" class="rail">
         <ChecklistPanel />
         <DynamicForm />
         <MaterialPanel />
@@ -208,37 +244,30 @@ onBackPress(() => {
       </view>
     </view>
 
+    <!-- 底部操作条 -->
     <view class="dock">
-      <view class="dock__main">
-        <!-- 第一步：填完信息，先换材料清单（清单由条件判定产出） -->
-        <button
-          v-if="!store.intakeId"
-          class="btn"
-          :disabled="!store.formComplete || store.preparing || store.running"
-          @click="store.prepare()"
-        >
-          {{ prepareLabel }}
-        </button>
+      <button
+        class="btn"
+        :class="{ 'btn--muted': !store.canSubmit && !store.preparing }"
+        @click="onPrimary()"
+      >
+        {{ store.intakeId ? submitLabel : prepareLabel }}
+      </button>
 
-        <!-- 第二步：材料齐备后才允许并联提交 -->
-        <button v-else class="btn" :disabled="!store.canSubmit" @click="store.start()">
-          {{ submitLabel }}
-        </button>
+      <text v-if="store.missingFields.length" class="dock__hint">
+        还差 {{ store.missingFields.length }} 项：{{ missingText }}
+      </text>
+    </view>
 
-        <button class="btn btn--ghost dock__save" @click="onSaveDraft">保存草稿</button>
-      </view>
-
-      <view class="dock__aside">
-        <text v-if="store.missingFields.length" class="dock__hint">
-          还差 {{ store.missingFields.length }} 项：{{ missingText }}
-        </text>
-        <view class="query">
-          <input
-            v-model="queryId"
-            class="query__input"
-            placeholder="输入办理单号回看，如 YJS0001"
-          />
-          <button class="btn btn--ghost query__btn" @click="store.query(queryId)">查询</button>
+    <!-- 离开前的未保存提示 -->
+    <view v-if="leaveAsk" class="mask">
+      <view class="ask">
+        <text class="ask__title">内容还没保存</text>
+        <text class="ask__body">申请信息、对话记录和已传材料还没保存，离开后会丢失。</text>
+        <view class="ask__btns">
+          <view class="ask__btn ask__btn--primary" @click="confirmLeave('save')">保存草稿并离开</view>
+          <view class="ask__btn ask__btn--danger" @click="confirmLeave('discard')">不保存，直接离开</view>
+          <view class="ask__btn" @click="confirmLeave('cancel')">取消</view>
         </view>
       </view>
     </view>
@@ -250,110 +279,98 @@ onBackPress(() => {
 </template>
 
 <style>
-.app {
-  min-height: 100vh;
-  box-sizing: border-box;
-  padding: 16px 20px 132px;
-  background: #f2f5fa;
-}
-
-/* ---------------- 顶部 ---------------- */
-.hero {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding: 16px 18px;
-  background: linear-gradient(120deg, #1f6feb, #3f8cff 60%, #56a8ff);
-  border-radius: 16px;
-  box-shadow: 0 10px 24px rgba(31, 111, 235, 0.18);
-}
-
-.hero__brand {
+.page {
   display: flex;
   flex-direction: column;
+  height: 100%;
+  box-sizing: border-box;
+  background: #eef2f8;
+  overflow: hidden;
 }
 
-.hero__title {
-  font-size: 20px;
-  font-weight: 700;
-  color: #ffffff;
-  letter-spacing: 0.4px;
-}
-
-.hero__sub {
-  margin-top: 4px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.82);
-}
-
-.hero__scenarios {
+/* ---------------- 顶栏 ---------------- */
+.top {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 14px;
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  background: #ffffff;
+  border-bottom: 1px solid #e3e9f2;
 }
 
-.chip {
-  padding: 6px 14px;
+.top__back {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 10px 4px 4px;
+  border-radius: 8px;
+  background: #f2f6fd;
+}
+
+.top__back-icon {
+  font-size: 16px;
+  color: #1f6feb;
+}
+
+.top__back-text {
   font-size: 13px;
   color: #1f6feb;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  border-radius: 999px;
 }
 
-.chip--on {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.18);
-  border-color: rgba(255, 255, 255, 0.9);
+.top__name {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1f2329;
+  white-space: nowrap;
 }
 
-/* ---------------- 三步指示 ---------------- */
 .steps {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 14px 2px 0;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
 }
 
 .step {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 12px 5px 6px;
-  background: #ffffff;
+  gap: 4px;
+  padding: 3px 9px 3px 3px;
   border: 1px solid #e5e7eb;
   border-radius: 999px;
 }
 
-.step__idx {
+.step__dot {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  font-size: 11px;
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
   color: #6b7280;
   background: #eef1f5;
   border-radius: 50%;
 }
 
 .step__text {
-  font-size: 12px;
+  font-size: 11px;
   color: #6b7280;
+  white-space: nowrap;
 }
 
 .step--on {
   border-color: #f0c674;
 }
 
-.step--on .step__text {
-  color: #b45309;
-}
-
-.step--on .step__idx {
+.step--on .step__dot {
   color: #ffffff;
   background: #d97706;
+}
+
+.step--on .step__text {
+  color: #b45309;
 }
 
 .step--done {
@@ -361,17 +378,17 @@ onBackPress(() => {
   background: #f4fbf6;
 }
 
-.step--done .step__text {
-  color: #15803d;
-}
-
-.step--done .step__idx {
+.step--done .step__dot {
   color: #ffffff;
   background: #16a34a;
 }
 
+.step--done .step__text {
+  color: #15803d;
+}
+
 .step__line {
-  flex: 0 0 28px;
+  flex: 0 0 16px;
   height: 2px;
   background: #e2e8f0;
   border-radius: 2px;
@@ -381,193 +398,247 @@ onBackPress(() => {
   background: #9ad3b0;
 }
 
+.top__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.top__hint {
+  font-size: 11px;
+  color: #b45309;
+}
+
+.top__btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  color: #ffffff;
+  background: #1f6feb;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.top__btn--ghost {
+  color: #1f6feb;
+  background: #ffffff;
+  border: 1px solid #c3d6f7;
+}
+
+.querybar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  background: #f7f9fc;
+  border-bottom: 1px solid #e3e9f2;
+}
+
+.querybar__input {
+  flex: 1;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  font-size: 12px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.querybar__btn {
+  padding: 6px 16px;
+  font-size: 12px;
+  color: #1f6feb;
+  background: #ffffff;
+  border: 1px solid #c3d6f7;
+  border-radius: 8px;
+}
+
 /* ---------------- 主体 ---------------- */
 .body {
   display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  margin-top: 14px;
-}
-
-.col {
-  display: flex;
-  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   gap: 14px;
+  padding: 14px 18px;
 }
 
-.col--chat {
-  position: sticky;
-  top: 16px;
-  flex: 1 1 440px;
-  min-width: 0;
-  height: calc(100vh - 240px);
-  min-height: 420px;
-}
-
-.col--side {
-  flex: 0 0 430px;
-}
-
-/* 窄屏（含 App 竖屏）：单列堆叠，避免左右互相挤压 */
-@media (max-width: 960px) {
-  .app {
-    padding: 12px 12px 150px;
-  }
-
-  .body {
-    flex-direction: column;
-  }
-
-  .col--chat {
-    position: static;
-    flex: 1 1 auto;
-    width: 100%;
-    height: 420px;
-  }
-
-  .col--side {
-    flex: 1 1 auto;
-    width: 100%;
-  }
-
-  .steps {
-    flex-wrap: wrap;
-  }
-
-  .dock {
-    padding: 8px 12px 10px;
-  }
-
-  .dock__aside {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
-  }
-
-  .query {
-    width: 100%;
-  }
-
-  .query__input {
-    flex: 1;
-    width: auto;
-  }
-}
-
-/* ---------------- 底部操作条 ---------------- */
-.dock {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 10;
+/* 对话区：占满剩余宽度，内容限宽居中，像通用 AI 助手 */
+.chatwrap {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 20px 12px;
-  background: rgba(255, 255, 255, 0.94);
-  border-top: 1px solid #e6ebf2;
-  box-shadow: 0 -8px 20px rgba(15, 23, 42, 0.06);
-}
-
-.dock__main {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  max-width: 640px;
-  margin: 0 auto;
-}
-
-.dock__aside {
-  display: flex;
-  align-items: center;
+  flex: 1 1 auto;
   justify-content: center;
-  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chatbox {
+  display: flex;
   width: 100%;
-  max-width: 640px;
-  margin: 0 auto;
+  max-width: 760px;
+  min-height: 0;
+}
+
+/* 右侧详情栏 */
+.rail {
+  display: flex;
+  flex: 0 0 400px;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+/* ---------------- 底部条 ---------------- */
+.dock {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  padding: 11px 18px;
+  background: #ffffff;
+  border-top: 1px solid #e3e9f2;
+  box-shadow: 0 -6px 16px rgba(15, 23, 42, 0.05);
+}
+
+.btn {
+  flex: 0 0 320px;
+  height: 38px;
+  line-height: 38px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffffff;
+  background: #1f6feb;
+  border: none;
+  border-radius: 9px;
+}
+
+.btn--muted {
+  background: #a9c3ee;
+  color: #f2f6ff;
+  box-shadow: none;
 }
 
 .dock__hint {
   flex: 1;
   min-width: 0;
   font-size: 12px;
-  line-height: 16px;
   color: #b45309;
 }
 
-.dock__save {
-  flex: 0 0 96px;
-}
-
-.btn {
-  flex: 1;
-  height: 42px;
-  line-height: 42px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #ffffff;
-  background: #1f6feb;
-  border: none;
-  border-radius: 10px;
-  box-shadow: 0 6px 14px rgba(31, 111, 235, 0.2);
-}
-
-.btn[disabled] {
-  background: #a9c3ee;
-  color: #f2f6ff;
-  box-shadow: none;
-}
-
-.btn--ghost {
-  color: #1f6feb;
-  background: #ffffff;
-  border: 1px solid #c3d6f7;
-  box-shadow: none;
-}
-
-.query {
+.mask {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.45);
 }
 
-.query__input {
-  width: 210px;
-  height: 38px;
-  box-sizing: border-box;
-  padding: 0 12px;
+.ask {
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  padding: 22px 22px 16px;
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.25);
+}
+
+.ask__title {
+  font-size: 17px;
+  font-weight: 700;
+  color: #1f2329;
+}
+
+.ask__body {
+  margin-top: 8px;
   font-size: 13px;
-  background: #f7f9fc;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
+  line-height: 20px;
+  color: #6b7280;
 }
 
-.query__btn {
-  flex: 0 0 76px;
+.ask__btns {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.ask__btn {
   height: 38px;
   line-height: 38px;
+  font-size: 14px;
+  text-align: center;
+  color: #4b5563;
+  background: #f4f6fa;
+  border-radius: 9px;
+}
+
+.ask__btn--primary {
+  color: #ffffff;
+  background: #1f6feb;
+}
+
+.ask__btn--danger {
+  color: #b91c1c;
+  background: #fdeaea;
 }
 
 .toast {
   position: fixed;
   left: 50%;
-  bottom: 92px;
+  bottom: 74px;
   transform: translateX(-50%);
   z-index: 20;
-  /* 提示是整句话（说清"哪里不对 + 怎么改"），要能舒服地读多行 */
   max-width: min(80%, 460px);
   box-sizing: border-box;
   padding: 10px 16px;
   font-size: 13px;
   line-height: 20px;
-  text-align: left;
   word-break: break-word;
   color: #ffffff;
   background: #ef4444;
   border-radius: 10px;
   box-shadow: 0 6px 20px rgba(239, 68, 68, 0.28);
+}
+
+/* 窄屏（含 App 竖屏）：对话在上，详情在下，整页可滚 */
+@media (max-width: 900px) {
+  .page {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .body {
+    flex-direction: column;
+  }
+
+  .chatbox {
+    max-width: none;
+    height: 520px;
+  }
+
+  .rail {
+    flex: 1 1 auto;
+    width: 100%;
+    overflow: visible;
+  }
+
+  .steps {
+    display: none;
+  }
+
+  .dock {
+    position: sticky;
+    bottom: 0;
+  }
+
+  .btn {
+    flex: 1;
+  }
 }
 </style>

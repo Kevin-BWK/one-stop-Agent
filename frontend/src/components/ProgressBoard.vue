@@ -78,6 +78,7 @@ function itemDept(itemId: string): string {
 <style scoped>
 .board {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   min-height: 0;
   background: #ffffff;
@@ -122,7 +123,7 @@ function itemDept(itemId: string): string {
 .board__body {
   flex: 1;
   min-height: 0;
-  max-height: 320px;
+  max-height: 300px;
   padding: 0 16px 12px;
 }
 
