@@ -156,7 +156,7 @@ function icon(status: string): string {
 .vstep__line {
   flex: 1;
   width: 2px;
-  min-height: 14px;
+  min-height: 13px;
   background: #e2e8f0;
   border-radius: 2px;
 }
